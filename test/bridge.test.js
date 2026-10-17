@@ -51,6 +51,85 @@ test('per-message mapping prevents conversation cross-talk', async t => {
   assert.deepEqual(f.sent.map(x => x.target), ['group-2', 'alice']);
 });
 
+test('Slack reply body retains newlines, blank paragraphs and indentation through WeCom delivery', async t => {
+  const f = fixture(t);
+  f.bridge.receiveWecom(frame('linebreaks')); await f.bridge.drain();
+  const body = '第一行\n第二行\n\n1. 项目一\n  说明 &amp; 更多\n2. 项目二\r\n最后一行\n';
+  assert.equal(f.bridge.receiveSlack(reply({ text: `[wecom:owner]\n${body}` })), true);
+  await f.bridge.drain();
+  assert.deepEqual(f.sent, [{ target: 'alice', text: body.replace('&amp;', '&') }]);
+});
+
+test('multipart Slack reply retains every newline across persisted chunks and restart', async t => {
+  const f = fixture(t);
+  f.bridge.receiveWecom(frame('long-linebreaks')); await f.bridge.drain();
+  const body = '中😀\n第二行\n\n'.repeat(700);
+  f.bridge.wecomReady = false;
+  assert.equal(f.bridge.receiveSlack(reply({ text: `[wecom:owner]\n${body}` })), true);
+  await f.bridge.drain();
+  await f.restart(); await f.bridge.drain();
+  assert.ok(f.sent.length > 1);
+  assert.equal(f.sent.map(({ text }) => text.replace(/^\[\d+\/\d+\] /, '')).join(''), body);
+});
+
+const richText = (...sections) => [{ type: 'rich_text', elements: sections.map(nodes => ({
+  type: 'rich_text_section', elements: nodes.map(text => ({ type: 'text', text })),
+})) }];
+
+test('rich text restores flattened reply paragraphs from the observed 15-text-node shape', async t => {
+  const f = fixture(t);
+  f.bridge.receiveWecom(frame('rich-paragraphs')); await f.bridge.drain();
+  const nodes = ['[wecom:owner]', '\n', '第一段', '\n\n', '第二段', '\n\n', '第三段', '\n\n', '第四段', '\n\n', '第五段', '\n\n', '第六段', '\n\n', 'https://example.com/?a=1&amp;b=2'];
+  const original = nodes.join('');
+  assert.equal((original.match(/\n/g) || []).length, 13);
+  assert.equal(f.bridge.receiveSlack(reply({ text: original.replace(/\n+/g, ' '), blocks: richText(nodes) })), true);
+  await f.bridge.drain();
+  assert.deepEqual(f.sent, [{ target: 'alice', text: original.replace('[wecom:owner]\n', '').replace('&amp;', '&') }]);
+});
+
+test('multiple supported rich text sections restore boundaries without changing words', async t => {
+  const f = fixture(t);
+  f.bridge.receiveWecom(frame('rich-sections')); await f.bridge.drain();
+  const blocks = [...richText(['[wecom:owner]\nFirst'], ['Second']), ...richText(['Third'])];
+  assert.equal(f.bridge.receiveSlack(reply({ text: '[wecom:owner] First Second Third', blocks })), true);
+  await f.bridge.drain();
+  assert.equal(f.sent[0].text, 'First\nSecond\nThird');
+});
+
+test('unsupported, malformed, oversized or differing rich text falls back to original reply body', async t => {
+  const f = fixture(t);
+  f.bridge.receiveWecom(frame('rich-fallback')); await f.bridge.drain();
+  const cases = [
+    [{ type: 'section', text: { type: 'mrkdwn', text: '[wecom:owner]\nOther' } }],
+    [{ type: 'rich_text', elements: null }],
+    [{ type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [{ type: 'link', url: 'https://example.com/' }] }] }],
+    richText(['[wecom:owner]\nDifferent content']),
+    richText(['[wecom:owner]\n' + 'x'.repeat(160001)]),
+    richText(['No marker\nOriginal body']),
+  ];
+  for (const [index, blocks] of cases.entries()) {
+    assert.equal(f.bridge.receiveSlack(reply({ ts: `300.${index}`, text: '[wecom:owner] Original body', blocks })), true);
+    await f.bridge.drain();
+    assert.equal(f.sent.at(-1).text, 'Original body');
+  }
+});
+
+test('rich text cannot override routing, authenticate senders or change application root events', async t => {
+  const roots = [];
+  const f = fixture(t, { application: { receiveRoot: (_bridge, event) => { roots.push(event); return true; } } });
+  f.bridge.receiveWecom(group('rich-routing')); await f.bridge.drain();
+  for (const marker of ['group', 'review', 'issue', 'unknown']) {
+    assert.equal(f.bridge.receiveSlack(reply({ blocks: richText([`[wecom:${marker}]\nReply 世界 😀`]) })), false);
+  }
+  assert.equal(f.bridge.receiveSlack(reply({ text: 'No route', blocks: richText(['[wecom:owner]\nBody']) })), false);
+  assert.equal(f.bridge.receiveSlack(reply({ bot_id: 'BOTHER', blocks: richText(['[wecom:owner]\nReply 世界 😀']) })), false);
+  const root = reply({ thread_ts: undefined, text: '[wecom:issue] {"body":"original"}', blocks: richText(['[wecom:owner]\nReplacement']) });
+  assert.equal(f.bridge.receiveSlack(root), true);
+  assert.equal(roots[0], root);
+  await f.bridge.drain();
+  assert.equal(f.sent.length, 0);
+});
+
 test('dedup survives restart; changing event envelope does not duplicate Slack delivery', async t => {
   const f = fixture(t); f.bridge.receiveWecom(frame()); await f.bridge.drain();
   f.bridge.receiveSlack(reply(), 'Ev1'); await f.bridge.drain(); await f.restart();

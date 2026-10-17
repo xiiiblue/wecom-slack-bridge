@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { chunks, slackEscape, slackDecode } from './text.js';
+import { chunks, slackEscape, slackReplyBody } from './text.js';
 const hash = text => createHash('sha256').update(text).digest('hex');
 function allowedSender(event, config, own = {}) {
   if (event.type !== 'message' || event.channel !== config.slackChannel || typeof event.ts !== 'string' || !event.ts || typeof event.text !== 'string' || !event.text.trim()) return false;
@@ -83,11 +83,13 @@ export class Bridge {
     // No leading-text trimming, inferred destination, arbitrary target or default/public fallback.
     const route = /^\[wecom:(owner|review|group)\]\s*([\s\S]+)$/.exec(event.text);
     if (!route || !route[2].trim() || (route[1] !== 'owner' && (request.kind !== 'group' || !this.config.allowedChats.has(request.target)))) return false;
+    const body = slackReplyBody(event, route);
+    if (body === null) return false;
     const source = `slack:${hash(`${event.channel}:${event.ts}`)}`;
     const inserted = this.store.transaction(() => {
       if (this.store.get('SELECT id FROM seen WHERE id=?', source)) return false;
       this.store.run('INSERT INTO seen VALUES (?,?)', source, now);
-      let text = slackDecode(route[2]);
+      let text = body;
       if (route[1] === 'review') {
         const review = randomUUID();
         this.store.run("UPDATE reviews SET status='superseded' WHERE request=? AND status='pending'", request.id);
