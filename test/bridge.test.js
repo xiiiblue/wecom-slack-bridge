@@ -159,7 +159,7 @@ test('all authenticated group members accepted; unknown groups, missing sender, 
 
 test('strict leading-marker route rejects implicit/public routing, forged authors and owner-root group routing', async t => {
   const f = fixture(t); f.bridge.receiveWecom(frame()); await f.bridge.drain();
-  for (const text of ['No route', ' [wecom:owner]\nX', '[wecom:unknown]\nX', '[wecom:group]\nprivate', '[wecom:group]private', '[wecom:group] private', '\n[wecom:owner]X', '[wecom:Owner]X', '[wecom:owner-extra]X', '[wecom:owner]\n  ', 'prefix\n[wecom:owner]\nX']) assert.equal(f.bridge.receiveSlack(reply({ text })), false);
+  for (const text of ['No route', ' [wecom:owner]\nX', '[wecom:unknown]\nX', '[wecom:group]\nprivate', '[wecom:group]private', '[wecom:group] private', '[wecom:review]private', '[wecom:review] private', '[wecom:review]\nprivate', '\n[wecom:owner]X', '[wecom:Owner]X', '[wecom:owner-extra]X', '[wecom:owner]\n  ', 'prefix\n[wecom:owner]\nX']) assert.equal(f.bridge.receiveSlack(reply({ text })), false);
   assert.equal(f.bridge.receiveSlack(reply({ bot_id: 'BOTHER' })), false);
   assert.equal(f.bridge.receiveSlack(reply({ channel: 'COTHER' })), false);
   await f.bridge.drain(); assert.equal(f.sent.length, 0);
@@ -168,20 +168,22 @@ test('strict leading-marker route rejects implicit/public routing, forged author
   assert.match(f.posted[1].text, /"sender":"member"/);
 });
 
-test('leading group and owner markers accept transport-normalized same-line bodies', async t => {
+test('all three leading markers accept transport-normalized same-line bodies', async t => {
   const f = fixture(t);
   f.bridge.receiveWecom(group('normalized-group')); await f.bridge.drain();
   f.bridge.receiveWecom(frame('normalized-owner')); await f.bridge.drain();
   const separators = ['', ' ', '\t', '\n', '\r\n', '\n\n'];
   for (const [index, separator] of separators.entries()) {
-    for (const [route, root, target] of [['group', '100.1', 'group-2'], ['owner', '100.2', 'alice']]) {
+    for (const [route, root, target] of [['group', '100.1', 'group-2'], ['owner', '100.2', 'alice'], ['review', '100.1', 'alice']]) {
       assert.equal(f.bridge.receiveSlack(reply({ thread_ts: root, ts: `200.${index}-${route}`, text: `[wecom:${route}]${separator}Body 世界 &amp; more` })), true);
       await f.bridge.drain();
-      assert.deepEqual(f.sent.at(-1), { target, text: 'Body 世界 & more' });
+      assert.equal(f.sent.at(-1).target, target);
+      if (route === 'review') assert.match(f.sent.at(-1).text, /^Body 世界 & more\n\n关联问题：/);
+      else assert.equal(f.sent.at(-1).text, 'Body 世界 & more');
     }
   }
-  assert.equal(f.sent.length, separators.length * 2);
-  assert.equal(f.bridge.receiveSlack(reply({ ts: '300.1', text: '[wecom:owner]Review this' })), true);
+  assert.equal(f.sent.length, separators.length * 3);
+  assert.equal(f.bridge.receiveSlack(reply({ ts: '300.1', text: '[wecom:review]Review this' })), true);
   await f.bridge.drain();
   assert.equal(f.sent.at(-1).target, 'alice');
   assert.match(f.sent.at(-1).text, /^Review this\n\n关联问题：/);
@@ -190,7 +192,7 @@ test('leading group and owner markers accept transport-normalized same-line bodi
 
 test('leading markers with empty or whitespace-only bodies never enqueue delivery', async t => {
   const f = fixture(t); f.bridge.receiveWecom(group('empty-body')); await f.bridge.drain();
-  for (const route of ['owner', 'group']) {
+  for (const route of ['owner', 'review', 'group']) {
     for (const body of ['', ' ', '\t', '\n', '\r\n', '\n \t\n']) {
       assert.equal(f.bridge.receiveSlack(reply({ text: `[wecom:${route}]${body}` })), false);
     }
@@ -205,8 +207,8 @@ test('two reviews correlate exact owner replies; no bare-OK guessing or public a
   const f = fixture(t);
   f.bridge.receiveWecom(group('one')); await f.bridge.drain();
   f.bridge.receiveWecom(group('two')); await f.bridge.drain();
-  f.bridge.receiveSlack(routed('100.1', '200.1', 'owner', 'Review first')); await f.bridge.drain(); const first = reviewId(f);
-  f.bridge.receiveSlack(routed('100.2', '200.2', 'owner', 'Review second')); await f.bridge.drain(); const second = reviewId(f);
+  f.bridge.receiveSlack(routed('100.1', '200.1', 'review', 'Review first')); await f.bridge.drain(); const first = reviewId(f);
+  f.bridge.receiveSlack(routed('100.2', '200.2', 'review', 'Review second')); await f.bridge.drain(); const second = reviewId(f);
   assert.notEqual(first, second); assert.ok(f.sent.every(x => x.target === 'alice'));
   const request = f.store.get("SELECT id FROM requests WHERE root='100.1'").id;
   assert.equal(f.sent[0].text, `Review first\n\n关联问题：${request}\n如需回复，请复制下面一行，把“你的意见”替换成回复内容：\n/review ${first} 你的意见\n请保留编号，在本私聊发送。同一问题请使用最新消息里的命令，旧编号已失效。`);
@@ -224,14 +226,14 @@ test('two reviews correlate exact owner replies; no bare-OK guessing or public a
 
 test('review supersession, restart, replay and expiry fail closed', async t => {
   const f = fixture(t); f.bridge.receiveWecom(group('one')); await f.bridge.drain();
-  f.bridge.receiveSlack(routed('100.1', '200.1', 'owner')); await f.bridge.drain(); const old = reviewId(f);
-  f.bridge.receiveSlack(routed('100.1', '200.2', 'owner')); await f.bridge.drain(); const current = reviewId(f);
+  f.bridge.receiveSlack(routed('100.1', '200.1', 'review')); await f.bridge.drain(); const old = reviewId(f);
+  f.bridge.receiveSlack(routed('100.1', '200.2', 'review')); await f.bridge.drain(); const current = reviewId(f);
   await f.restart();
   assert.equal(f.bridge.receiveWecom(frame('old', 'alice', { text: { content: `/review ${old} yes` } })), false);
   assert.equal(f.bridge.receiveWecom(frame('current', 'alice', { text: { content: `/review ${current} yes` } })), true);
   await f.bridge.drain(); await f.restart();
   assert.equal(f.bridge.receiveWecom(frame('replay', 'alice', { text: { content: `/review ${current} yes` } })), false);
-  f.bridge.receiveSlack(routed('100.1', '200.3', 'owner')); await f.bridge.drain(); const expires = reviewId(f);
+  f.bridge.receiveSlack(routed('100.1', '200.3', 'review')); await f.bridge.drain(); const expires = reviewId(f);
   f.advance(config.ttlMs + 1);
   assert.equal(f.bridge.receiveWecom(frame('expired', 'alice', { text: { content: `/review ${expires} yes` } })), false);
 });
@@ -292,4 +294,55 @@ test('queued Slack work cannot move channels or outlive owner/group configuratio
     assert.equal(f.posted.length, 0);
     assert.equal(f.store.get('SELECT status FROM jobs').status, 'unknown');
   }
+});
+
+test('plain owner replies preserve pending reviews and acknowledgments do not open new reviews', async t => {
+  const f = fixture(t); f.bridge.receiveWecom(group('plain-owner')); await f.bridge.drain();
+  assert.match(f.posted[0].text, /\[wecom:review\]/);
+  f.bridge.receiveSlack(routed('100.1', '200.1', 'review', 'Please review')); await f.bridge.drain();
+  const id = reviewId(f);
+  f.bridge.receiveSlack(routed('100.1', '200.2', 'owner', 'Still working')); await f.bridge.drain();
+  assert.deepEqual(f.sent.at(-1), { target: 'alice', text: 'Still working' });
+  assert.equal(reviewId(f), id);
+  assert.equal(f.store.get('SELECT count(*) n FROM reviews').n, 1);
+  assert.equal(f.bridge.receiveWecom(frame('decision', 'alice', { text: { content: `/review ${id} revise it` } })), true);
+  await f.bridge.drain(); assert.equal(f.posted.at(-1).thread_ts, '100.1');
+  f.bridge.receiveSlack(routed('100.1', '200.3', 'owner', 'Received')); await f.bridge.drain();
+  assert.deepEqual(f.sent.at(-1), { target: 'alice', text: 'Received' });
+  assert.equal(f.store.get('SELECT count(*) n FROM reviews').n, 1);
+  assert.equal(f.store.get('SELECT status FROM reviews WHERE id=?', id).status, 'consumed');
+  assert.equal(f.store.get("SELECT count(*) n FROM jobs WHERE direction='wecom' AND lane!='owner'").n, 0);
+});
+
+test('review and plain owner share the private lane; unknown blocks both without blocking group', async t => {
+  for (const first of ['owner', 'review']) {
+    const attempts = [];
+    const f = fixture(t, { wecom: { ack: async () => {}, send: async (target, text) => { attempts.push({ target, text }); if (target === 'alice') throw new Error('unknown'); return { errcode: 0 }; } } });
+    f.bridge.receiveWecom(group('shared-lane')); await f.bridge.drain();
+    f.bridge.receiveSlack(routed('100.1', '200.1', first)); await f.bridge.drain();
+    f.bridge.receiveSlack(routed('100.1', '200.2', first === 'owner' ? 'review' : 'owner')); await f.bridge.drain();
+    f.bridge.receiveSlack(routed('100.1', '200.3', 'group', 'Public status')); await f.bridge.drain();
+    await f.restart(); await f.bridge.drain();
+    assert.deepEqual(attempts.map(x => x.target), ['alice', 'group-2']);
+    assert.equal(f.store.get("SELECT count(*) n FROM jobs WHERE lane='owner' AND status='pending'").n, 1);
+    assert.equal(f.store.get("SELECT count(*) n FROM jobs WHERE lane='review'").n, 0);
+  }
+});
+
+test('existing review rows and pinned private queue payloads survive restart unchanged', async t => {
+  const f = fixture(t); f.bridge.receiveWecom(group('existing')); await f.bridge.drain();
+  const request = f.store.get('SELECT * FROM requests');
+  const id = '12345678-1234-1234-1234-123456789abc';
+  // Model an already-persisted pre-split owner review and pending delivery.
+  f.store.run('INSERT INTO reviews VALUES (?,?,?,?)', id, request.id, request.expires, 'pending');
+  const text = `Existing review\n/review ${id} 你的意见`;
+  f.store.addJob(request.id, 'wecom', { text }, 'owner', 'alice');
+  const previous = f.store.get('SELECT * FROM reviews WHERE id=?', id);
+  await f.restart(); await f.bridge.drain();
+  assert.deepEqual(f.store.get('SELECT * FROM reviews WHERE id=?', id), previous);
+  assert.deepEqual(f.sent, [{ target: 'alice', text }]);
+  f.bridge.receiveSlack(routed('100.1', '200.1', 'owner', 'Acknowledged')); await f.bridge.drain();
+  assert.deepEqual(f.store.get('SELECT * FROM reviews WHERE id=?', id), previous);
+  assert.equal(f.bridge.receiveWecom(frame('existing-answer', 'alice', { text: { content: `/review ${id} yes` } })), true);
+  await f.bridge.drain(); assert.equal(f.posted.at(-1).thread_ts, '100.1');
 });

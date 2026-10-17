@@ -6,14 +6,14 @@
 
 本项目只负责消息传输，不调用 LLM，不提供 dot API，也不会模拟或冒充 dot。若希望由已有 dot 回复，需要该账户本身支持 Slack 接入，并在项目之外单独配置和授权消息自动化。不同账户的功能、费用和响应时间可能不同，不能承诺任意账户免费、即时可用。
 
-> English summary: A transport-only MVP between WeCom smart-bot WebSocket connections and Slack Socket Mode. Members of approved WeCom groups can ask questions; only the configured owner can use direct messages. Replies from one pinned Slack identity require an explicit owner/group route, and private review responses return to the original Slack thread without automatic publication or execution. An existing, separately configured responder is required. No LLM backend or public dot API is included. Live end-to-end verification and deployment are still pending.
+> English summary: A transport-only MVP between WeCom smart-bot WebSocket connections and Slack Socket Mode. Members of approved WeCom groups can ask questions; only the configured owner can use direct messages. Replies from one pinned Slack identity require an explicit owner/review/group route, and private review responses return to the original Slack thread without automatic publication or execution. An existing, separately configured responder is required. No LLM backend or public dot API is included. Live end-to-end verification and deployment are still pending.
 
 ## 数据流
 
 1. 授权群内任意成员可通过 @机器人提问；群白名单按稳定 chatid 核验，不按成员姓名或自称身份核验。群内文本是否由平台投递给机器人，仍取决于实际平台设置。
 2. 仅配置的本人 `WECOM_OWNER_USER_ID` 可单聊机器人，其他人的单聊被拒绝。本人单聊不受群白名单限制。
 3. 桥接器在固定 Slack 私有频道发布完整请求根消息，区分来源信息和不可信原文；超长输入拒绝转发。
-4. 固定可信回复身份在原线程输出以严格路由标记开头的文本：`[wecom:owner]` 发给本人，`[wecom:group]` 仅发原请求群。没有有效路由就不发送；本人私聊请求禁止群路由。
+4. 固定可信回复身份在原线程输出以严格路由标记开头的文本：`[wecom:owner]` 发普通本人私聊，`[wecom:review]` 为群请求发起本人评审，`[wecom:group]` 仅发原请求群。没有有效路由就不发送；本人私聊请求禁止评审及群路由。
 5. 需要本人决策时，使用下述私聊评审协议。本人带唯一评审编号的答复回到原 Slack 线程，绝不自动转群，也不自动执行批准内容。之后可公开的结论仍需可信响应方单独明确选择群路由。
 
 发布本项目不涉及公开任何私有仓库、其他项目源码或真实聊天记录。启用转发前，须明确授权发送者、内容范围、Slack 接收频道和回传内容。详见 [安全边界](docs/SECURITY.md)。
@@ -82,15 +82,17 @@ npm start
 - 排除响应方自己的输出、其他用户和机器人消息，避免循环。不能仅凭正文中的来源标签或 metadata 判断作者身份。
 - 原文是外部内容。即使其中伪造路由标记、本人姓名或“已批准”，也不是桥接生成的控制信息或操作授权。
 - 每条新请求完整呈现在一个根消息中，metadata 的 `event_type` 为 `wecom_bridge_request`；本人评审答复的类型为 `wecom_bridge_owner_response`，带 `request_id` 和 `review_id`（两类均有 `part/parts`）。这些字段辅助关联，不代替作者身份校验。任何后续回复均放在**原根消息线程**，不要另开根消息或靠编辑旧消息发送结果。
-- 每条要回传的可信 Slack 文本必须以精确的 `[wecom:owner]` 或 `[wecom:group]` 标记开头，后接非空正文。建议另起一行写正文；为兼容传输层移除换行，标记与正文间允许零个或多个空白字符，也接受同行正文。不要在路由前加解释、空行或代码块。缺失、未知或格式不符的路由不发送，不回落到群。
-- `[wecom:owner]` 的目标只能来自配置；`[wecom:group]` 的目标只能来自原群请求记录。正文不能指定任意 userid/chatid。本人的私聊请求永远不能使用群路由。
+- 每条要回传的可信 Slack 文本必须以精确的 `[wecom:owner]`、`[wecom:review]` 或 `[wecom:group]` 标记开头，后接非空正文。建议另起一行写正文；为兼容传输层移除换行，标记与正文间允许零个或多个空白字符，也接受同行正文。不要在路由前加解释、空行或代码块。缺失、未知或格式不符的路由不发送，不回落到群。
+- `[wecom:owner]` 和 `[wecom:review]` 的目标只能来自配置；`[wecom:group]` 的目标只能来自原群请求记录。正文不能指定任意 userid/chatid。本人的私聊请求永远不能使用评审或群路由。
 - 群路由是显式公开选择，不是隐私检查器。响应方必须只写适合原群全体成员的信息；不得把本人的评审原文、其他私聊、私人文件或无关记忆直接复制进群回复。
 - 桥接器不执行操作。本人的已验证答复也只是传递决策信息，执行方仍须核验具体任务、操作、权限和所需确认，不能把“同意”字符串当成无限授权。
 - 首次使用先以无敏感测试验证根消息及桥接线程回复均能触发该账户的自动化，回复者能遵循路由规则且不会响应自己的消息。仅安装本项目不会满足这些条件。
 
 ### 私聊评审与关联
 
-群请求的每条 `[wecom:owner]` 回复开启一轮新评审，并替代该任务上一轮待评审 ID。发给本人的私聊先显示正文，再显示关联问题编号和中文回复提示。只有需要回复时，才复制单独一行的命令，将“你的意见”替换为回复内容，保留编号并在该私聊发送；同一问题使用最新消息里的命令：
+`[wecom:owner]` 只发送普通私聊正文，不附加评审提示，不创建、消耗或替代评审 ID。可用于确认收到、进度通知或普通答复，即使该群任务仍有待评审 ID，也不会影响其继续使用。`[wecom:review]` 仅适用于群来源请求，才会创建下面的评审流程。
+
+群请求的每条 `[wecom:review]` 回复开启一轮新评审，并替代该任务上一轮待评审 ID。发给本人的私聊先显示正文，再显示关联问题编号和中文回复提示。只有需要回复时，才复制单独一行的命令，将“你的意见”替换为回复内容，保留编号并在该私聊发送；同一问题使用最新消息里的命令：
 
 ```text
 /review <review-id> 你的意见
@@ -104,12 +106,14 @@ npm start
 
 ## 状态、恢复与限制
 
+本次显式评审拆分有意改变 `[wecom:owner]` 的含义：不再隐式发起群任务评审。上线必须协调更新桥接程序和响应方自动化，将真正需要评审的输出改为 `[wecom:review]`，普通私聊保留 `[wecom:owner]`；旧根消息可能仍含旧版提示，不能据此继续使用旧语义。无兼容开关，也不新增数据库迁移。已有评审记录与排队消息保留原语义、目标、正文及到期时间，重启不会重新解释或重写它们。详见 [升级步骤](deploy/README.md)。
+
 - 使用 SQLite 保存请求映射、消息队列和去重状态。该目录可能含消息文本与身份 ID，应按敏感运行数据保护，并排除在 Git 外。
 - 未发送的 pending 项可恢复；进程在发送中崩溃、或发送调用报错后，结果可能无法判断，记录为 unknown，不自动重放。先人工核对两端再决定是否重新提问。
 - 请求映射和消息按 TTL 过期，去重记录保留 7 天；备份和远端服务副本不受本地过期机制控制。
 - 超长企业微信输入不进入队列；尽力回复“消息过长，未转发。请拆成更短的消息后重试。”Slack 回复文本上限独立为 160000 UTF-8 字节。
 - 企业微信回传使用主动 Markdown 消息，长回复按不超过 3500 UTF-8 字节分片。最初的接收回执为尽力发送。
-- 私聊失败或发送结果未知时，不会把私聊内容改发群里。按固定路由隔离队列顺序，同一路由内仍保留分片顺序；不确定送达必须人工核验。
+- 私聊失败或发送结果未知时，不会把私聊内容改发群里。`owner` 与 `review` 共用原 `owner` 私聊队列，和群队列隔离；同一队列内仍保留分片顺序；不确定送达必须人工核验。
 - 当前仅面向文本；不提供文件、图片、语音、多租户、逐成员群授权、工作流执行引擎或事务级送达保证。
 - 状态目录有进程级 SQLite 独占锁，防止多个实例共享同一状态目录；不同目录仍不可复用同一 Bot ID。
 - 配置/状态/身份验证失败、企业微信认证重试耗尽或连接被替代时，进程退出码为 78，需要人工检查。初始 Slack 网络失败或企业微信重连耗尽退出码为 1，可由 supervisor 有限重启。不要靠自动重启反复争抢同一 Bot ID。

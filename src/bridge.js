@@ -46,7 +46,7 @@ export class Bridge {
         this.store.addJob(id, 'slack', { part: 1, parts: 1, review: review.id, text: `Owner review response | request ${id} | review ${review.id}\nTransport only: interpret the owner's words; no approval or execution is performed by this bridge.\n${envelope(match[2])}` }, 'slack', c.slackChannel);
       } else {
         this.store.run('INSERT INTO requests(id,source,target,created,expires,root,status,kind,owner,channel) VALUES (?,?,?,?,?,NULL,?,?,?,?)', id, source, target, now, now + c.ttlMs, 'pending', kind, c.ownerUser, c.slackChannel);
-        this.store.addJob(id, 'slack', { part: 1, parts: 1, text: `WeCom external text | request ${id}\nReply in this root thread with exact leading marker [wecom:owner] or [wecom:group], followed by the reply body. Owner-only requests prohibit group routing.\n${envelope(text)}` }, 'slack', c.slackChannel);
+        this.store.addJob(id, 'slack', { part: 1, parts: 1, text: `WeCom external text | request ${id}\nReply in this root thread with exact leading marker [wecom:owner] for a plain private reply, [wecom:review] to request owner review of a group request, or [wecom:group] to reply to the original group, followed by the reply body. Owner-only requests prohibit review and group routing.\n${envelope(text)}` }, 'slack', c.slackChannel);
       }
       return true;
     });
@@ -62,22 +62,23 @@ export class Bridge {
     if (!request || request.status !== 'sent' || !['single', 'group'].includes(request.kind) || request.owner !== this.config.ownerUser || request.channel !== this.config.slackChannel || Buffer.byteLength(event.text) > 160000) return false;
     // Require an exact leading marker; transports may remove the separating newline.
     // No leading-text trimming, inferred destination, arbitrary target or default/public fallback.
-    const route = /^\[wecom:(owner|group)\]\s*([\s\S]+)$/.exec(event.text);
-    if (!route || !route[2].trim() || (route[1] === 'group' && (request.kind !== 'group' || !this.config.allowedChats.has(request.target)))) return false;
+    const route = /^\[wecom:(owner|review|group)\]\s*([\s\S]+)$/.exec(event.text);
+    if (!route || !route[2].trim() || (route[1] !== 'owner' && (request.kind !== 'group' || !this.config.allowedChats.has(request.target)))) return false;
     const source = `slack:${hash(`${event.channel}:${event.ts}`)}`;
     const inserted = this.store.transaction(() => {
       if (this.store.get('SELECT id FROM seen WHERE id=?', source)) return false;
       this.store.run('INSERT INTO seen VALUES (?,?)', source, now);
       let text = slackDecode(route[2]);
-      if (route[1] === 'owner' && request.kind === 'group') {
+      if (route[1] === 'review') {
         const review = randomUUID();
         this.store.run("UPDATE reviews SET status='superseded' WHERE request=? AND status='pending'", request.id);
         this.store.run('INSERT INTO reviews VALUES (?,?,?,?)', review, request.id, request.expires, 'pending');
         text = `${text}\n\n关联问题：${request.id}\n如需回复，请复制下面一行，把“你的意见”替换成回复内容：\n/review ${review} 你的意见\n请保留编号，在本私聊发送。同一问题请使用最新消息里的命令，旧编号已失效。`;
       }
       const parts = chunks(text, 3400);
-      const target = route[1] === 'owner' ? request.owner : request.target;
-      parts.forEach((text, index) => this.store.addJob(request.id, 'wecom', { text: parts.length > 1 ? `[${index + 1}/${parts.length}] ${text}` : text }, route[1], target));
+      const lane = route[1] === 'group' ? 'group' : 'owner';
+      const target = lane === 'owner' ? request.owner : request.target;
+      parts.forEach((text, index) => this.store.addJob(request.id, 'wecom', { text: parts.length > 1 ? `[${index + 1}/${parts.length}] ${text}` : text }, lane, target));
       return true;
     });
     if (inserted) this.drain();
