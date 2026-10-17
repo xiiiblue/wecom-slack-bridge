@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { chunks, slackEscape, slackDecode, slackReplyBody } from './text.js';
+import { chunks, slackEscape, slackDecode, slackReplyBody, formatDeadline } from './text.js';
 const hash = text => createHash('sha256').update(text).digest('hex');
 function allowedSender(event, config, own = {}) {
   if (event.type !== 'message' || event.channel !== config.slackChannel || typeof event.ts !== 'string' || !event.ts || typeof event.text !== 'string' || !event.text.trim()) return false;
@@ -144,7 +144,7 @@ export class Bridge {
   }
   queueConversationText(request, text) {
     const { code } = this.store.get('SELECT code FROM owner_conversations WHERE request=?', request.id);
-    const hint = `\n\n回复 N${code} 你的回复\n请在本私聊保留编号；有效至 ${new Date(request.expires).toISOString()}，到期请联系发送方重新发起。`;
+    const hint = `\n\n回复 N${code} 你的回复\n请在本私聊保留编号；有效至 ${formatDeadline(request.expires)}，到期请联系发送方重新发起。`;
     const parts = chunks(text, 3200);
     parts.forEach((part, index) => this.store.addJob(request.id, 'wecom', { text: `${parts.length > 1 ? `[${index + 1}/${parts.length}] ` : ''}${part}${hint}` }, 'owner', request.owner));
     this.store.run("UPDATE owner_conversations SET last_delivery=(SELECT MAX(id) FROM jobs WHERE request=? AND lane='owner') WHERE request=?", request.id, request.id);

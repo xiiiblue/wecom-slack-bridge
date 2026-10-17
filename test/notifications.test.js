@@ -22,7 +22,7 @@ function fixture(t, extra = {}) {
 }
 test('proactive fixed-owner notification needs no prior WeCom request and no user UUID', async t => {
   const f = fixture(t); assert.equal(f.bridge.receiveSlack(root()), true); await f.bridge.drain();
-  assert.equal(f.posted.length, 0); assert.equal(f.sent[0].target, 'alice'); assert.match(f.sent[0].text, /回复 N1 你的回复/); assert.match(f.sent[0].text, /有效至/);
+  assert.equal(f.posted.length, 0); assert.equal(f.sent[0].target, 'alice'); assert.match(f.sent[0].text, /回复 N1 你的回复/); assert.match(f.sent[0].text, /有效至 1970-01-01 09:01:40，/); assert.equal(f.store.get('SELECT expires FROM requests').expires, 3700000);
   assert.doesNotMatch(f.sent[0].text, /[a-f0-9]{8}-[a-f0-9]{4}-/);
   assert.equal(f.store.get('SELECT root FROM requests').root, '1.1');
   assert.equal(f.bridge.receiveWecom(owner()), true); await f.bridge.drain();
@@ -63,7 +63,7 @@ test('multi-turn continuation uses the same explicit code and original Slack thr
   f.bridge.receiveWecom(owner()); await f.bridge.drain();
   const reply = root('2.1', { thread_ts: '1.1', text: '[wecom:owner]\n第一段\n\n第二段 &amp; 内容' });
   assert.equal(f.bridge.receiveSlack(reply), true); await f.bridge.drain();
-  assert.match(f.sent.at(-1).text, /^第一段\n\n第二段 & 内容/); assert.match(f.sent.at(-1).text, /回复 N1/);
+  assert.match(f.sent.at(-1).text, /^第一段\n\n第二段 & 内容/); assert.match(f.sent.at(-1).text, /回复 N1/); assert.match(f.sent.at(-1).text, /有效至 1970-01-01 09:01:40，/);
   assert.equal(f.bridge.receiveWecom(owner('m2', '回复 N1 再回复')), true); await f.bridge.drain();
   assert.deepEqual(f.posted.map(p => p.thread_ts), ['1.1', '1.1']);
   for (const marker of ['review', 'group']) assert.equal(f.bridge.receiveSlack(root('3.1', { thread_ts: '1.1', text: `[wecom:${marker}] x` })), false);

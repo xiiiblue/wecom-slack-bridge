@@ -47,3 +47,6 @@ export function slackReplyBody(event, route) {
   const normalized = text => text.replace(/\s+/g, ' ').trim();
   return normalized(body) === normalized(fallback) ? body : fallback;
 }
+
+// Display only: fixed UTC+08:00, independent of the host TZ. Keep stored epoch unchanged.
+export const formatDeadline = epoch => new Date(epoch + 8 * 3600000).toISOString().slice(0, 19).replace('T', ' ');
