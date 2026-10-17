@@ -1,0 +1,36 @@
+# Review paths and permissions before installing. This file deploys nothing itself.
+[Unit]
+Description=WeCom Slack text bridge
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=wecom-bridge
+Group=wecom-bridge
+WorkingDirectory=/opt/wecom-slack-bridge
+Environment=NODE_ENV=production
+Environment=STATE_DIR=/var/lib/wecom-slack-bridge
+EnvironmentFile=/etc/wecom-slack-bridge.env
+ExecStart=/usr/bin/node /opt/wecom-slack-bridge/src/main.js
+Restart=on-failure
+RestartSec=15
+RestartPreventExitStatus=78
+StateDirectory=wecom-slack-bridge
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/wecom-slack-bridge
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
