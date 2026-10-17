@@ -9,8 +9,11 @@ export function loadConfig(env = process.env) {
     slackToken: required('SLACK_BOT_TOKEN'), slackAppToken: required('SLACK_APP_TOKEN'),
     slackChannel: required('SLACK_CHANNEL_ID'), replyBot: env.SLACK_REPLY_BOT_ID?.trim(), replyUser: env.SLACK_REPLY_USER_ID?.trim(),
     stateDir: resolve(env.STATE_DIR || './data'), ttlMs: integer('REPLY_TTL_SECONDS', 3600, 86400) * 1000,
+    issueRepository: env.ISSUE_REPOSITORY?.trim() || '',
     maxBytes: integer('MAX_MESSAGE_BYTES', 32000, 32000),
   };
+  if (config.issueRepository && !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/.test(config.issueRepository)) throw new Error('Invalid ISSUE_REPOSITORY');
+  if (config.issueRepository && ['.', '..'].includes(config.issueRepository.split('/')[1])) throw new Error('Invalid ISSUE_REPOSITORY');
   if (!config.allowedChats.size) throw new Error('WECOM_ALLOWED_CHAT_IDS must not be empty');
   if (config.allowedChats.has(config.ownerUser)) throw new Error('Owner ID must not be a group destination');
   if (Boolean(config.replyBot) === Boolean(config.replyUser)) throw new Error('Set exactly one SLACK_REPLY_BOT_ID or SLACK_REPLY_USER_ID');
