@@ -184,8 +184,8 @@ test('leading group and owner markers accept transport-normalized same-line bodi
   assert.equal(f.bridge.receiveSlack(reply({ ts: '300.1', text: '[wecom:owner]Review this' })), true);
   await f.bridge.drain();
   assert.equal(f.sent.at(-1).target, 'alice');
-  assert.match(f.sent.at(-1).text, /^Owner review /);
-  assert.match(f.sent.at(-1).text, /\n\nReview this$/);
+  assert.match(f.sent.at(-1).text, /^Review this\n\n关联问题：/);
+  assert.match(f.sent.at(-1).text, new RegExp(`\\n/review ${reviewId(f)} 你的意见\\n`));
 });
 
 test('leading markers with empty or whitespace-only bodies never enqueue delivery', async t => {
@@ -208,9 +208,12 @@ test('two reviews correlate exact owner replies; no bare-OK guessing or public a
   f.bridge.receiveSlack(routed('100.1', '200.1', 'owner', 'Review first')); await f.bridge.drain(); const first = reviewId(f);
   f.bridge.receiveSlack(routed('100.2', '200.2', 'owner', 'Review second')); await f.bridge.drain(); const second = reviewId(f);
   assert.notEqual(first, second); assert.ok(f.sent.every(x => x.target === 'alice'));
-  assert.match(f.sent[0].text, new RegExp(`Original request: ${f.store.get("SELECT id FROM requests WHERE root='100.1'").id}`));
+  const request = f.store.get("SELECT id FROM requests WHERE root='100.1'").id;
+  assert.equal(f.sent[0].text, `Review first\n\n关联问题：${request}\n如需回复，请复制下面一行，把“你的意见”替换成回复内容：\n/review ${first} 你的意见\n请保留编号，在本私聊发送。同一问题请使用最新消息里的命令，旧编号已失效。`);
+  assert.equal(f.sent[0].text.split(first).length - 1, 1);
+  const answer = f.sent[1].text.split('\n').find(line => line.startsWith('/review ')).replace('你的意见', 'change this');
   assert.equal(f.bridge.receiveWecom(frame('forged', 'member', { text: { content: `/review ${first} yes` } })), false);
-  assert.equal(f.bridge.receiveWecom(frame('answer', 'alice', { text: { content: `/review ${second} change this` } })), true);
+  assert.equal(f.bridge.receiveWecom(frame('answer', 'alice', { text: { content: answer } })), true);
   await f.bridge.drain(); assert.equal(f.posted[2].thread_ts, '100.2'); assert.match(f.posted[2].text, /change this/);
   assert.equal(f.sent.length, 2);
   assert.equal(f.bridge.receiveWecom(frame('duplicate', 'alice', { text: { content: `/review ${second} yes` } })), false);

@@ -73,7 +73,7 @@ export class Bridge {
         const review = randomUUID();
         this.store.run("UPDATE reviews SET status='superseded' WHERE request=? AND status='pending'", request.id);
         this.store.run('INSERT INTO reviews VALUES (?,?,?,?)', review, request.id, request.expires, 'pending');
-        text = `Owner review ${review}\nOriginal request: ${request.id}\nReply in this private chat: /review ${review} <your response>\nThis starts a new review round; earlier review IDs for this request no longer work.\n\n${text}`;
+        text = `${text}\n\n关联问题：${request.id}\n如需回复，请复制下面一行，把“你的意见”替换成回复内容：\n/review ${review} 你的意见\n请保留编号，在本私聊发送。同一问题请使用最新消息里的命令，旧编号已失效。`;
       }
       const parts = chunks(text, 3400);
       const target = route[1] === 'owner' ? request.owner : request.target;
