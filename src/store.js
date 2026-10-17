@@ -15,15 +15,26 @@ export class Store {
       CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, source TEXT UNIQUE, target TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, root TEXT UNIQUE, status TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY, created INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, request TEXT NOT NULL, direction TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending');`);
+    // Additive migration: legacy targets lack trustworthy group/owner provenance.
+    this.transaction(() => {
+      if (!this.all('PRAGMA table_info(requests)').some(x => x.name === 'kind')) {
+        this.db.exec(`ALTER TABLE requests ADD COLUMN kind TEXT NOT NULL DEFAULT 'legacy'; ALTER TABLE requests ADD COLUMN owner TEXT; ALTER TABLE requests ADD COLUMN channel TEXT;
+          ALTER TABLE jobs ADD COLUMN lane TEXT NOT NULL DEFAULT 'legacy'; ALTER TABLE jobs ADD COLUMN target TEXT;`);
+        this.run("UPDATE requests SET status='quarantined'");
+        this.run("UPDATE jobs SET status='quarantined' WHERE status!='sent'");
+      }
+      this.db.exec(`CREATE TABLE IF NOT EXISTS reviews (id TEXT PRIMARY KEY, request TEXT NOT NULL, expires INTEGER NOT NULL, status TEXT NOT NULL)`);
+    });
     this.db.exec("UPDATE jobs SET status='unknown' WHERE status='sending'");
   }
   transaction(fn) { this.db.exec('BEGIN IMMEDIATE'); try { const value = fn(); this.db.exec('COMMIT'); return value; } catch (e) { this.db.exec('ROLLBACK'); throw e; } }
   run(sql, ...args) { return this.db.prepare(sql).run(...args); }
   get(sql, ...args) { return this.db.prepare(sql).get(...args); }
   all(sql, ...args) { return this.db.prepare(sql).all(...args); }
-  addJob(id, direction, payload) { this.run('INSERT INTO jobs(request,direction,payload) VALUES (?,?,?)', id, direction, JSON.stringify(payload)); }
+  addJob(id, direction, payload, lane = direction, target = null) { this.run('INSERT INTO jobs(request,direction,payload,lane,target) VALUES (?,?,?,?,?)', id, direction, JSON.stringify(payload), lane, target); }
   prune(now) {
     this.transaction(() => {
+      this.run('DELETE FROM reviews WHERE expires < ?', now);
       this.run('DELETE FROM jobs WHERE request IN (SELECT id FROM requests WHERE expires < ?)', now);
       this.run('DELETE FROM requests WHERE expires < ?', now);
       this.run('DELETE FROM seen WHERE created < ?', now - 7 * 86400000);

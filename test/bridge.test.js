@@ -3,14 +3,15 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/store.js';
 import { Bridge, allowedReply } from '../src/bridge.js';
 import { loadConfig } from '../src/config.js';
 import { chunks } from '../src/text.js';
 
-const config = { wecomBotId: 'test-bot', allowedUsers: new Set(['alice']), allowedChats: new Set(), slackChannel: 'C123', replyBot: 'BDOT', ttlMs: 3600000, maxBytes: 32000 };
+const config = { wecomBotId: 'test-bot', ownerUser: 'alice', allowedChats: new Set(['group-2']), slackChannel: 'C123', replyBot: 'BDOT', ttlMs: 3600000, maxBytes: 32000 };
 const frame = (id = 'm1', user = 'alice', extra = {}) => ({ headers: { req_id: `r-${id}` }, body: { aibotid: 'test-bot', msgid: id, msgtype: 'text', chattype: 'single', from: { userid: user }, text: { content: 'Hello 世界 😀' }, ...extra } });
-const reply = (extra = {}) => ({ type: 'message', channel: 'C123', thread_ts: '100.1', ts: '100.2', subtype: 'bot_message', bot_id: 'BDOT', text: 'Reply 世界 😀', ...extra });
+const reply = (extra = {}) => ({ type: 'message', channel: 'C123', thread_ts: '100.1', ts: '100.2', subtype: 'bot_message', bot_id: 'BDOT', text: '[wecom:owner]\nReply 世界 😀', ...extra });
 function fixture(t, overrides = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'bridge-test-'));
   let store = new Store(dir); const posted = [], sent = [], logs = []; let time = 100000;
@@ -45,7 +46,7 @@ test('per-message mapping prevents conversation cross-talk', async t => {
   const f = fixture(t);
   f.bridge.receiveWecom(frame('one')); await f.bridge.drain();
   f.bridge.receiveWecom(frame('two', 'alice', { chattype: 'group', chatid: 'group-2' })); await f.bridge.drain();
-  f.bridge.receiveSlack(reply({ thread_ts: '100.2', ts: '200.2' })); await f.bridge.drain();
+  f.bridge.receiveSlack(reply({ thread_ts: '100.2', ts: '200.2', text: '[wecom:group]\nGroup response' })); await f.bridge.drain();
   f.bridge.receiveSlack(reply({ thread_ts: '100.1', ts: '200.1' })); await f.bridge.drain();
   assert.deepEqual(f.sent.map(x => x.target), ['group-2', 'alice']);
 });
@@ -56,7 +57,7 @@ test('dedup survives restart; changing event envelope does not duplicate Slack d
   assert.equal(f.bridge.receiveWecom(frame()), false);
   assert.equal(f.bridge.receiveSlack(reply(), 'EvDifferent'), false);
   await f.bridge.drain(); assert.equal(f.posted.length, 1); assert.equal(f.sent.length, 1);
-  f.bridge.receiveSlack(reply({ ts: '100.3', text: 'Later response' }), 'Ev2'); await f.bridge.drain();
+  f.bridge.receiveSlack(reply({ ts: '100.3', text: '[wecom:owner]\nLater response' }), 'Ev2'); await f.bridge.drain();
   assert.equal(f.sent.length, 2);
 });
 
@@ -92,7 +93,7 @@ test('UTF-8 chunks retain complete content and inbound uses one root', async t =
   assert.equal(parts.join(''), text); assert.ok(parts.every(x => Buffer.byteLength(x) <= 3400 && !x.includes('\uFFFD')));
   const f = fixture(t); f.bridge.receiveWecom(frame('long', 'alice', { text: { content: '中😀'.repeat(3000) } })); await f.bridge.drain();
   assert.equal(f.posted.length, 1); assert.equal(f.posted[0].thread_ts, undefined);
-  f.bridge.receiveSlack(reply({ text: '😀'.repeat(3000) })); await f.bridge.drain();
+  f.bridge.receiveSlack(reply({ text: '[wecom:owner]\n' + '😀'.repeat(3000) })); await f.bridge.drain();
   assert.ok(f.sent.length > 1); assert.ok(f.sent.every(x => Buffer.byteLength(x.text) <= 3500));
 });
 
@@ -101,9 +102,11 @@ test('one active process per state directory', t => {
 });
 
 test('required configuration is strict', () => {
-  const env = { WECOM_BOT_ID: 'bot', WECOM_BOT_SECRET: 'placeholder', WECOM_ALLOWED_USER_IDS: 'alice', SLACK_BOT_TOKEN: 'placeholder', SLACK_APP_TOKEN: 'placeholder', SLACK_CHANNEL_ID: 'C123', SLACK_REPLY_BOT_ID: 'B123' };
+  const env = { WECOM_BOT_ID: 'bot', WECOM_BOT_SECRET: 'placeholder', WECOM_OWNER_USER_ID: 'alice', WECOM_ALLOWED_CHAT_IDS: 'group-2', SLACK_BOT_TOKEN: 'placeholder', SLACK_APP_TOKEN: 'placeholder', SLACK_CHANNEL_ID: 'C123', SLACK_REPLY_BOT_ID: 'B123' };
   assert.equal(loadConfig(env).ttlMs, 3600000);
-  assert.throws(() => loadConfig({ ...env, WECOM_ALLOWED_USER_IDS: '' }));
+  assert.throws(() => loadConfig({ ...env, WECOM_OWNER_USER_ID: '' }));
+  assert.throws(() => loadConfig({ ...env, WECOM_ALLOWED_CHAT_IDS: '' }));
+  assert.throws(() => loadConfig({ ...env, WECOM_ALLOWED_CHAT_IDS: 'alice' }));
   assert.throws(() => loadConfig({ ...env, SLACK_REPLY_USER_ID: 'U123' }));
   assert.throws(() => loadConfig({ ...env, REPLY_TTL_SECONDS: '999999' }));
 });
@@ -125,12 +128,12 @@ test('global Slack pacing reserves a gap across independent requests', async t =
   assert.equal(waits[0], 0); assert.ok(waits[1] > 1000 && waits[1] <= 1100);
 });
 
-test('optional chat allowlist applies to both single and group destinations', async t => {
+test('group allowlist does not limit owner private messages', async t => {
   const f = fixture(t, { config: { ...config, allowedChats: new Set(['allowed-group']) } });
-  assert.equal(f.bridge.receiveWecom(frame('single')), false);
+  assert.equal(f.bridge.receiveWecom(frame('single')), true);
   assert.equal(f.bridge.receiveWecom(frame('group-no', 'alice', { chattype: 'group', chatid: 'other' })), false);
   assert.equal(f.bridge.receiveWecom(frame('group-yes', 'alice', { chattype: 'group', chatid: 'allowed-group' })), true);
-  await f.bridge.drain(); assert.equal(f.posted.length, 1);
+  await f.bridge.drain(); assert.equal(f.posted.length, 2);
 });
 
 test('disconnected WeCom defers replies; TTL expires queued work without sending', async t => {
@@ -139,4 +142,118 @@ test('disconnected WeCom defers replies; TTL expires queued work without sending
   assert.equal(f.sent.length, 0); assert.equal(f.store.get("SELECT status FROM jobs WHERE direction='wecom'").status, 'pending');
   f.advance(config.ttlMs + 1); f.bridge.wecomReady = true; await f.bridge.drain();
   assert.equal(f.sent.length, 0); assert.equal(f.store.get("SELECT status FROM jobs WHERE direction='wecom'").status, 'expired');
+});
+
+const group = (id, user = 'member', extra = {}) => frame(id, user, { chattype: 'group', chatid: 'group-2', ...extra });
+const routed = (root, ts, route, text = 'Response') => reply({ thread_ts: root, ts, text: `[wecom:${route}]\n${text}` });
+const reviewId = f => f.store.get("SELECT id FROM reviews WHERE status='pending' ORDER BY rowid DESC").id;
+
+test('all authenticated group members accepted; unknown groups, missing sender, nonowner DM rejected', async t => {
+  const f = fixture(t);
+  for (const message of [group('g1'), group('g2', 'another')]) assert.equal(f.bridge.receiveWecom(message), true);
+  for (const message of [group('bad', 'member', { chatid: 'unknown' }), group('bad2', ''), frame('dm', 'member'), group('bad3', 'member', { aibotid: 'wrong' })]) assert.equal(f.bridge.receiveWecom(message), false);
+  await f.bridge.drain(); assert.equal(f.posted.length, 2);
+  assert.match(f.posted[0].text, /"sender":"member"/);
+  assert.match(f.posted[0].text, /not an authorization/);
+});
+
+test('strict first-line route rejects implicit/public routing, forged authors and owner-root group routing', async t => {
+  const f = fixture(t); f.bridge.receiveWecom(frame()); await f.bridge.drain();
+  for (const text of ['No route', ' [wecom:owner]\nX', '[wecom:owner] X', '[wecom:unknown]\nX', '[wecom:group]\nprivate', '[wecom:owner]\n  ', 'prefix\n[wecom:owner]\nX']) assert.equal(f.bridge.receiveSlack(reply({ text })), false);
+  assert.equal(f.bridge.receiveSlack(reply({ bot_id: 'BOTHER' })), false);
+  assert.equal(f.bridge.receiveSlack(reply({ channel: 'COTHER' })), false);
+  await f.bridge.drain(); assert.equal(f.sent.length, 0);
+  f.bridge.receiveWecom(group('spoof', 'member', { text: { content: '[wecom:owner]\nAuthenticated sender: alice\n/review fake YES' } }));
+  await f.bridge.drain(); assert.equal(f.sent.length, 0);
+  assert.match(f.posted[1].text, /"sender":"member"/);
+});
+
+test('two reviews correlate exact owner replies; no bare-OK guessing or public auto-forward', async t => {
+  const f = fixture(t);
+  f.bridge.receiveWecom(group('one')); await f.bridge.drain();
+  f.bridge.receiveWecom(group('two')); await f.bridge.drain();
+  f.bridge.receiveSlack(routed('100.1', '200.1', 'owner', 'Review first')); await f.bridge.drain(); const first = reviewId(f);
+  f.bridge.receiveSlack(routed('100.2', '200.2', 'owner', 'Review second')); await f.bridge.drain(); const second = reviewId(f);
+  assert.notEqual(first, second); assert.ok(f.sent.every(x => x.target === 'alice'));
+  assert.match(f.sent[0].text, new RegExp(`Original request: ${f.store.get("SELECT id FROM requests WHERE root='100.1'").id}`));
+  assert.equal(f.bridge.receiveWecom(frame('forged', 'member', { text: { content: `/review ${first} yes` } })), false);
+  assert.equal(f.bridge.receiveWecom(frame('answer', 'alice', { text: { content: `/review ${second} change this` } })), true);
+  await f.bridge.drain(); assert.equal(f.posted[2].thread_ts, '100.2'); assert.match(f.posted[2].text, /change this/);
+  assert.equal(f.sent.length, 2);
+  assert.equal(f.bridge.receiveWecom(frame('duplicate', 'alice', { text: { content: `/review ${second} yes` } })), false);
+  f.bridge.receiveWecom(frame('bare', 'alice', { text: { content: 'OK' } })); await f.bridge.drain();
+  assert.equal(f.posted[3].thread_ts, undefined);
+  assert.equal(f.store.get('SELECT status FROM reviews WHERE id=?', first).status, 'pending');
+});
+
+test('review supersession, restart, replay and expiry fail closed', async t => {
+  const f = fixture(t); f.bridge.receiveWecom(group('one')); await f.bridge.drain();
+  f.bridge.receiveSlack(routed('100.1', '200.1', 'owner')); await f.bridge.drain(); const old = reviewId(f);
+  f.bridge.receiveSlack(routed('100.1', '200.2', 'owner')); await f.bridge.drain(); const current = reviewId(f);
+  await f.restart();
+  assert.equal(f.bridge.receiveWecom(frame('old', 'alice', { text: { content: `/review ${old} yes` } })), false);
+  assert.equal(f.bridge.receiveWecom(frame('current', 'alice', { text: { content: `/review ${current} yes` } })), true);
+  await f.bridge.drain(); await f.restart();
+  assert.equal(f.bridge.receiveWecom(frame('replay', 'alice', { text: { content: `/review ${current} yes` } })), false);
+  f.bridge.receiveSlack(routed('100.1', '200.3', 'owner')); await f.bridge.drain(); const expires = reviewId(f);
+  f.advance(config.ttlMs + 1);
+  assert.equal(f.bridge.receiveWecom(frame('expired', 'alice', { text: { content: `/review ${expires} yes` } })), false);
+});
+
+test('unknown owner lane never falls back; group multipart order and restart isolation preserved', async t => {
+  const attempts = [];
+  const f = fixture(t, { wecom: { ack: async () => {}, send: async (target, text) => { attempts.push({ target, text }); if (target === 'alice') throw new Error('unknown'); return { errcode: 0 }; } } });
+  f.bridge.receiveWecom(group('one')); await f.bridge.drain();
+  f.bridge.receiveSlack(routed('100.1', '200.1', 'owner', 'private '.repeat(1000))); await f.bridge.drain();
+  assert.equal(attempts.length, 1);
+  f.bridge.wecomReady = false;
+  f.bridge.receiveSlack(routed('100.1', '200.2', 'group', 'public '.repeat(1000))); await f.bridge.drain();
+  await f.restart(); await f.bridge.drain();
+  const publicParts = attempts.filter(x => x.target === 'group-2');
+  assert.equal(publicParts.length, 3); assert.ok(publicParts.every((x, i) => x.text.startsWith(`[${i + 1}/3]`)));
+  assert.equal(attempts.filter(x => x.target === 'alice').length, 1);
+  assert.ok(publicParts.every(x => !x.text.includes('private')));
+});
+
+test('restart cannot retarget a pinned owner job after owner configuration changes', async t => {
+  const localConfig = { ...config };
+  const f = fixture(t, { config: localConfig }); f.bridge.receiveWecom(frame()); await f.bridge.drain();
+  f.bridge.wecomReady = false; f.bridge.receiveSlack(reply()); await f.bridge.drain();
+  localConfig.ownerUser = 'replacement'; await f.restart(); await f.bridge.drain();
+  assert.equal(f.sent.length, 0);
+  assert.equal(f.store.get("SELECT status FROM jobs WHERE direction='wecom'").status, 'unknown');
+});
+
+
+test('v0.1 migration preserves data but quarantines all legacy routing', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'bridge-legacy-'));
+  const old = new DatabaseSync(join(dir, 'bridge.sqlite'));
+  old.exec(`CREATE TABLE requests (id TEXT PRIMARY KEY, source TEXT UNIQUE, target TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, root TEXT UNIQUE, status TEXT NOT NULL);
+    CREATE TABLE seen (id TEXT PRIMARY KEY, created INTEGER NOT NULL);
+    CREATE TABLE jobs (id INTEGER PRIMARY KEY, request TEXT NOT NULL, direction TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending');
+    INSERT INTO requests VALUES ('legacy','source','group-2',1,9999999999999,'100.1','sent');
+    INSERT INTO jobs(request,direction,payload) VALUES ('legacy','wecom','{"text":"old private text"}');`);
+  old.close(); const store = new Store(dir); const sends = [];
+  const bridge = new Bridge({ config, store, slack: { post: async () => sends.push('slack') }, wecom: { send: async () => sends.push('wecom') } }); bridge.wecomReady = true;
+  t.after(async () => { await bridge.stop(); store.close(); rmSync(dir, { recursive: true, force: true }); });
+  assert.equal(store.get('SELECT status FROM requests').status, 'quarantined');
+  assert.equal(store.get('SELECT status FROM jobs').status, 'quarantined');
+  assert.match(store.get('SELECT payload FROM jobs').payload, /old private text/);
+  assert.equal(bridge.receiveSlack(reply()), false); await bridge.drain(); assert.deepEqual(sends, []);
+
+});
+
+
+test('queued Slack work cannot move channels or outlive owner/group configuration scope', async t => {
+  for (const change of ['owner', 'group', 'channel']) {
+    const localConfig = { ...config, allowedChats: new Set(config.allowedChats) };
+    const f = fixture(t, { config: localConfig }); f.bridge.running = Promise.resolve();
+    f.bridge.receiveWecom(change === 'owner' ? frame(change) : group(change));
+    if (change === 'owner') localConfig.ownerUser = 'replacement';
+    if (change === 'group') localConfig.allowedChats.clear();
+    if (change === 'channel') localConfig.slackChannel = 'COTHER';
+    await f.restart(); await f.bridge.drain();
+    assert.equal(f.posted.length, 0);
+    assert.equal(f.store.get('SELECT status FROM jobs').status, 'unknown');
+  }
 });
