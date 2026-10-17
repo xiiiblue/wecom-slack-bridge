@@ -4,8 +4,23 @@
   "private": true,
   "description": "Allowlisted text transport between WeCom intelligent robots and a Slack thread responder",
   "type": "module",
-  "engines": {"node": ">=24"},
-  "scripts": {"start": "node --env-file-if-exists=.env src/main.js", "test": "node --test", "check": "node --check src/main.js && node --test"},
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/main.js",
+    "test": "node --test",
+    "check": "node --check src/main.js && node --check src/runtime.js && node --test"
+  },
   "license": "MIT",
-  "dependencies": {"@slack/bolt": "5.1.0", "@wecom/aibot-node-sdk": "1.0.7"}
+  "dependencies": {
+    "@slack/bolt": "5.1.0",
+    "@wecom/aibot-node-sdk": "1.0.7"
+  },
+  "exports": {
+    "./runtime": "./src/runtime.js",
+    "./bridge": "./src/bridge.js",
+    "./store": "./src/store.js",
+    "./text": "./src/text.js"
+  }
 }

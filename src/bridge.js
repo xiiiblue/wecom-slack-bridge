@@ -1,6 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { receiveIssue, decideIssue, issueAuthorized } from './issues.js';
 import { chunks, slackEscape, slackDecode } from './text.js';
 const hash = text => createHash('sha256').update(text).digest('hex');
 function allowedSender(event, config, own = {}) {
@@ -14,9 +13,16 @@ export function allowedReply(event, config, own = {}) {
   return !!event.thread_ts && event.thread_ts !== event.ts && allowedSender(event, config, own);
 }
 export class Bridge {
-  constructor({ config, store, slack, wecom, log = () => {}, now = Date.now, own = {}, wait = delay }) {
-    Object.assign(this, { config, store, slack, wecom, log, now, own, wait });
+  constructor({ config, store, slack, wecom, log = () => {}, now = Date.now, own = {}, wait = delay, application = null }) {
+    Object.assign(this, { config, store, slack, wecom, log, now, own, wait, application });
     this.running = null; this.stopping = false; this.wecomReady = false; this.lastSlackAt = 0;
+  }
+  // Application hooks are trusted local code; transport authentication always runs first.
+  authorizedRequest(request) {
+    if (request.owner !== this.config.ownerUser || (request.request_channel ?? request.channel) !== this.config.slackChannel) return false;
+    if (request.kind === 'single') return true;
+    if (request.kind === 'group') return this.config.allowedChats.has(request.original_target ?? request.target);
+    try { return this.application?.authorizeRequest?.(this, request) === true; } catch { return false; }
   }
   receiveWecom(frame) {
     if (this.stopping) return false;
@@ -40,11 +46,16 @@ export class Bridge {
     const inserted = this.store.transaction(() => {
       if (this.store.get('SELECT id FROM seen WHERE id=?', source)) return false;
       this.store.run('INSERT INTO seen VALUES (?,?)', source, now);
+      if (kind === 'single' && this.application?.receiveOwnerText) {
+        const result = this.application.receiveOwnerText(this, text, source, now);
+        if (result !== null) {
+          if (typeof result !== 'string' || !result) return false;
+          id = result; return true;
+        }
+      }
       if (kind === 'single' && /^\/review(?:\s|$)/.test(text)) {
         const match = /^\/review ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) ([\s\S]+)$/.exec(text);
         if (!match || !match[2].trim()) return false;
-        const issue = decideIssue(this, match[1], match[2], source, now);
-        if (issue !== null) { if (!issue) return false; id = issue; return true; }
         const review = this.store.get(`SELECT v.*,r.root,r.kind,r.owner,r.channel,r.target,r.status AS request_status,r.expires AS request_expires FROM reviews v JOIN requests r ON r.id=v.request WHERE v.id=?`, match[1]);
         if (!review || review.status !== 'pending' || review.expires < now || review.request_expires < now || review.kind !== 'group' || !c.allowedChats.has(review.target) || review.owner !== c.ownerUser || review.channel !== c.slackChannel || review.request_status !== 'sent' || !review.root) return false;
         id = review.request;
@@ -63,11 +74,11 @@ export class Bridge {
   }
   receiveSlack(event, eventId) {
     if (this.stopping) return false;
-    if ((!event.thread_ts || event.thread_ts === event.ts) && allowedSender(event, this.config, this.own)) return receiveIssue(this, event);
+    if ((!event.thread_ts || event.thread_ts === event.ts) && allowedSender(event, this.config, this.own)) return this.application?.receiveRoot?.(this, event) === true;
     if (!allowedReply(event, this.config, this.own)) return false;
     const now = this.now();
-    const request = this.store.get("SELECT * FROM requests WHERE root=? AND (kind='issue' OR expires>=?)", event.thread_ts, now);
-    if (!request || request.status !== 'sent' || !['single', 'group', 'issue'].includes(request.kind) || (request.kind === 'issue' && !issueAuthorized(this, request)) || request.owner !== this.config.ownerUser || request.channel !== this.config.slackChannel || Buffer.byteLength(event.text) > 160000) return false;
+    const request = this.store.get("SELECT * FROM requests WHERE root=?", event.thread_ts);
+    if (!request || request.status !== 'sent' || !this.authorizedRequest(request) || (['single', 'group'].includes(request.kind) && request.expires < now) || Buffer.byteLength(event.text) > 160000) return false;
     // Require an exact leading marker; transports may remove the separating newline.
     // No leading-text trimming, inferred destination, arbitrary target or default/public fallback.
     const route = /^\[wecom:(owner|review|group)\]\s*([\s\S]+)$/.exec(event.text);
@@ -86,7 +97,7 @@ export class Bridge {
       const parts = chunks(text, 3400);
       const lane = route[1] === 'group' ? 'group' : 'owner';
       const target = lane === 'owner' ? request.owner : request.target;
-      parts.forEach((text, index) => this.store.addJob(request.id, 'wecom', { text: parts.length > 1 ? `[${index + 1}/${parts.length}] ${text}` : text }, lane, target, request.kind === 'issue' ? now + this.config.ttlMs : null));
+      parts.forEach((text, index) => this.store.addJob(request.id, 'wecom', { text: parts.length > 1 ? `[${index + 1}/${parts.length}] ${text}` : text }, lane, target, !['single', 'group'].includes(request.kind) ? now + this.config.ttlMs : null));
       return true;
     });
     if (inserted) this.drain();
@@ -100,8 +111,8 @@ export class Bridge {
   async pump() {
     while (!this.stopping) {
       const job = this.store.get(`SELECT j.*,r.root,r.kind,r.owner,r.channel AS request_channel,r.target AS original_target,COALESCE(j.expires,r.expires) AS delivery_expires FROM jobs j JOIN requests r ON r.id=j.request
-        WHERE j.status='pending' AND (j.direction='slack' OR ?=1)
-        AND r.status!='quarantined' AND NOT EXISTS (SELECT 1 FROM jobs earlier WHERE earlier.request=j.request AND earlier.lane=j.lane AND earlier.id<j.id AND earlier.status!='sent') ORDER BY j.id LIMIT 1`, this.wecomReady ? 1 : 0);
+        WHERE j.status='pending' AND (j.direction='slack' OR ?=1) AND (r.kind IN ('single','group') OR ?=1)
+        AND r.status!='quarantined' AND NOT EXISTS (SELECT 1 FROM jobs earlier WHERE earlier.request=j.request AND earlier.lane=j.lane AND earlier.id<j.id AND earlier.status!='sent') ORDER BY j.id LIMIT 1`, this.wecomReady ? 1 : 0, this.application ? 1 : 0);
       if (!job) return;
       if (job.delivery_expires < this.now()) { this.store.run("UPDATE jobs SET status='expired' WHERE id=? AND status='pending'", job.id); continue; }
       if (job.direction === 'slack') {
@@ -115,7 +126,7 @@ export class Bridge {
       // Persist intent BEFORE network I/O. A crash or uncertain result must never cause blind replay.
       this.store.run("UPDATE jobs SET status='sending' WHERE id=?", job.id);
       try {
-        if (job.owner !== this.config.ownerUser || !['single', 'group', 'issue'].includes(job.kind) || (job.kind === 'issue' && !issueAuthorized(this, job)) || (job.kind === 'group' && !this.config.allowedChats.has(job.original_target))) throw new Error('Request no longer authorized');
+        if (!this.authorizedRequest(job)) throw new Error('Request no longer authorized');
         if (job.direction === 'slack') {
           if (job.target !== job.request_channel || job.target !== this.config.slackChannel) throw new Error('Invalid pinned Slack channel');
           const result = await this.slack.post({ channel: job.target, text: payload.text, ...(job.root ? { thread_ts: job.root } : {}), mrkdwn: false, parse: 'none', link_names: false, unfurl_links: false, unfurl_media: false,

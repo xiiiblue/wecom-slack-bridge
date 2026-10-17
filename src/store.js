@@ -24,8 +24,6 @@ export class Store {
         this.run("UPDATE jobs SET status='quarantined' WHERE status!='sent'");
       }
       if (!this.all('PRAGMA table_info(jobs)').some(x => x.name === 'expires')) this.db.exec('ALTER TABLE jobs ADD COLUMN expires INTEGER');
-      this.db.exec(`CREATE TABLE IF NOT EXISTS issue_proposals (id TEXT PRIMARY KEY, request TEXT UNIQUE NOT NULL, repo TEXT NOT NULL, issue_id TEXT NOT NULL, issue_number INTEGER NOT NULL, revision INTEGER NOT NULL, snapshot TEXT NOT NULL, owner TEXT NOT NULL, channel TEXT NOT NULL, root TEXT NOT NULL, created INTEGER NOT NULL, status TEXT NOT NULL, UNIQUE(repo,issue_id,revision));
-        CREATE TABLE IF NOT EXISTS issue_decisions (proposal TEXT PRIMARY KEY, decision TEXT NOT NULL, reason TEXT NOT NULL, actor TEXT NOT NULL, source TEXT UNIQUE NOT NULL, created INTEGER NOT NULL);`);
       this.db.exec(`CREATE TABLE IF NOT EXISTS reviews (id TEXT PRIMARY KEY, request TEXT NOT NULL, expires INTEGER NOT NULL, status TEXT NOT NULL)`);
     });
     this.db.exec("UPDATE jobs SET status='unknown' WHERE status='sending'");
@@ -38,8 +36,8 @@ export class Store {
   prune(now) {
     this.transaction(() => {
       this.run('DELETE FROM reviews WHERE expires < ?', now);
-      this.run("DELETE FROM jobs WHERE expires < ? OR request IN (SELECT id FROM requests WHERE kind!='issue' AND expires < ?)", now, now);
-      this.run("DELETE FROM requests WHERE kind!='issue' AND expires < ?", now);
+      this.run("DELETE FROM jobs WHERE expires < ? OR request IN (SELECT id FROM requests WHERE kind IN ('single','group','legacy') AND expires < ?)", now, now);
+      this.run("DELETE FROM requests WHERE kind IN ('single','group','legacy') AND expires < ?", now);
       this.run('DELETE FROM seen WHERE created < ?', now - 7 * 86400000);
     });
   }

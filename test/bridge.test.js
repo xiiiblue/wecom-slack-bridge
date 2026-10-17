@@ -346,3 +346,113 @@ test('existing review rows and pinned private queue payloads survive restart unc
   assert.equal(f.bridge.receiveWecom(frame('existing-answer', 'alice', { text: { content: `/review ${id} yes` } })), true);
   await f.bridge.drain(); assert.equal(f.posted.at(-1).thread_ts, '100.1');
 });
+
+test('application root hook runs only for authenticated allowlisted root events', async t => {
+  const roots = [];
+  const f = fixture(t, { application: { receiveRoot: (_bridge, event) => { roots.push(event); return true; } } });
+  const root = reply({ thread_ts: undefined });
+  for (const event of [reply(), { ...root, bot_id: 'BOTHER' }, { ...root, channel: 'COTHER' }, { ...root, subtype: 'message_changed' }]) assert.equal(f.bridge.receiveSlack(event), false);
+  assert.equal(f.bridge.receiveSlack(root), true);
+  assert.equal(roots.length, 1);
+  assert.equal(fixture(t).bridge.receiveSlack(root), false);
+});
+
+test('application owner hook runs inside dedup transaction and never for group text', async t => {
+  const calls = [];
+  const application = { receiveOwnerText(bridge, text, source) {
+    assert.ok(bridge.store.get('SELECT id FROM seen WHERE id=?', source));
+    calls.push(text);
+    return text === '/custom reject' ? false : null;
+  } };
+  const f = fixture(t, { application });
+  assert.equal(f.bridge.receiveWecom(frame('unauthorized', 'mallory')), false);
+  assert.equal(f.bridge.receiveWecom(frame('owner')), true); await f.bridge.drain();
+  assert.equal(f.bridge.receiveWecom(frame('owner')), false);
+  assert.equal(f.bridge.receiveWecom(group('group')), true); await f.bridge.drain();
+  assert.equal(f.bridge.receiveWecom(frame('rejected', 'alice', { text: { content: '/custom reject' } })), false);
+  assert.deepEqual(calls, ['Hello 世界 😀', '/custom reject']);
+  assert.equal(f.posted.length, 2);
+});
+
+function customRequest(store, overrides = {}) {
+  const row = { id: 'custom-1', source: 'custom-source', target: 'alice', created: 1, expires: 2, root: '100.1', status: 'sent', kind: 'custom', owner: 'alice', channel: 'C123', ...overrides };
+  store.run('INSERT INTO requests(id,source,target,created,expires,root,status,kind,owner,channel) VALUES (?,?,?,?,?,?,?,?,?,?)', ...Object.values(row));
+  return row;
+}
+
+test('standalone transport retains unknown custom rows and queued work without sending', async t => {
+  const f = fixture(t);
+  const row = customRequest(f.store);
+  f.store.db.exec('CREATE TABLE custom_records (value TEXT); INSERT INTO custom_records VALUES (\'preserve\')');
+  f.store.addJob(row.id, 'wecom', { text: 'durable payload' }, 'owner', 'alice', 999999);
+  f.store.prune(100000);
+  await f.restart(); await f.bridge.drain();
+  assert.equal(f.store.get('SELECT status FROM jobs').status, 'pending');
+  assert.equal(f.store.get('SELECT value FROM custom_records').value, 'preserve');
+  assert.equal(f.store.get('SELECT kind FROM requests').kind, 'custom');
+  assert.equal(f.bridge.receiveSlack(reply()), false);
+  assert.equal(f.sent.length, 0);
+  f.store.prune(1000000);
+  assert.equal(f.store.get('SELECT count(*) n FROM jobs').n, 0);
+  assert.equal(f.store.get('SELECT count(*) n FROM requests').n, 1);
+});
+
+test('custom request authorization is explicit, fail-closed, owner/channel pinned and owner-only', async t => {
+  for (const authorizeRequest of [undefined, () => false, () => 'yes', () => { throw new Error('denied'); }]) {
+    const f = fixture(t, { application: { authorizeRequest } });
+    customRequest(f.store);
+    assert.equal(f.bridge.receiveSlack(reply()), false);
+  }
+  const f = fixture(t, { application: { authorizeRequest: () => true } });
+  customRequest(f.store);
+  for (const route of ['review', 'group']) assert.equal(f.bridge.receiveSlack(reply({ text: `[wecom:${route}] body` })), false);
+  for (const [column, value] of [['owner', 'other'], ['channel', 'COTHER']]) {
+    const previous = f.store.get(`SELECT ${column} value FROM requests`).value;
+    f.store.run(`UPDATE requests SET ${column}=?`, value);
+    assert.equal(f.bridge.receiveSlack(reply()), false);
+    f.store.run(`UPDATE requests SET ${column}=?`, previous);
+  }
+  assert.equal(f.bridge.receiveSlack(reply()), true); await f.bridge.drain();
+  assert.deepEqual(f.sent, [{ target: 'alice', text: 'Reply 世界 😀' }]);
+  assert.equal(f.store.get('SELECT expires FROM jobs').expires, 100000 + config.ttlMs);
+});
+
+test('custom delivery revalidates application authorization and pinned channel after enqueue', async t => {
+  for (const change of ['application', 'channel']) {
+    let allow = true;
+    const c = { ...config };
+    const f = fixture(t, { config: c, application: { authorizeRequest: () => allow } });
+    customRequest(f.store);
+    f.bridge.wecomReady = false;
+    assert.equal(f.bridge.receiveSlack(reply()), true); await f.bridge.drain();
+    if (change === 'application') allow = false;
+    else c.slackChannel = 'COTHER';
+    f.bridge.wecomReady = true; await f.bridge.drain();
+    assert.equal(f.sent.length, 0);
+    assert.equal(f.store.get('SELECT status FROM jobs').status, 'unknown');
+  }
+});
+
+test('application initialization is explicit and handled owner text is not also forwarded', async t => {
+  let initialized = false;
+  const application = {
+    initialize({ store, config: c }) { assert.ok(store); assert.equal(c.ownerUser, 'alice'); initialized = true; },
+    receiveOwnerText(bridge, text) {
+      assert.equal(initialized, true);
+      if (text !== '/custom answer') return null;
+      const row = customRequest(bridge.store, { expires: 999999 });
+      bridge.store.addJob(row.id, 'slack', { text: 'handled', part: 1, parts: 1 }, 'slack', 'C123', 999999);
+      return row.id;
+    },
+    authorizeRequest: () => true,
+  };
+  const f = fixture(t, { application });
+  assert.equal(initialized, false);
+  application.initialize({ store: f.store, config });
+  assert.equal(f.bridge.receiveWecom(frame('custom', 'alice', { text: { content: '/custom answer' } })), true);
+  await f.bridge.drain();
+  assert.equal(f.posted.length, 1);
+  assert.equal(f.posted[0].text, 'handled');
+  assert.equal(f.posted[0].thread_ts, '100.1');
+  assert.equal(f.store.get('SELECT count(*) n FROM requests').n, 1);
+});
