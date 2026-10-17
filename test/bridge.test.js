@@ -157,15 +157,48 @@ test('all authenticated group members accepted; unknown groups, missing sender, 
   assert.match(f.posted[0].text, /not an authorization/);
 });
 
-test('strict first-line route rejects implicit/public routing, forged authors and owner-root group routing', async t => {
+test('strict leading-marker route rejects implicit/public routing, forged authors and owner-root group routing', async t => {
   const f = fixture(t); f.bridge.receiveWecom(frame()); await f.bridge.drain();
-  for (const text of ['No route', ' [wecom:owner]\nX', '[wecom:owner] X', '[wecom:unknown]\nX', '[wecom:group]\nprivate', '[wecom:owner]\n  ', 'prefix\n[wecom:owner]\nX']) assert.equal(f.bridge.receiveSlack(reply({ text })), false);
+  for (const text of ['No route', ' [wecom:owner]\nX', '[wecom:unknown]\nX', '[wecom:group]\nprivate', '[wecom:group]private', '[wecom:group] private', '\n[wecom:owner]X', '[wecom:Owner]X', '[wecom:owner-extra]X', '[wecom:owner]\n  ', 'prefix\n[wecom:owner]\nX']) assert.equal(f.bridge.receiveSlack(reply({ text })), false);
   assert.equal(f.bridge.receiveSlack(reply({ bot_id: 'BOTHER' })), false);
   assert.equal(f.bridge.receiveSlack(reply({ channel: 'COTHER' })), false);
   await f.bridge.drain(); assert.equal(f.sent.length, 0);
   f.bridge.receiveWecom(group('spoof', 'member', { text: { content: '[wecom:owner]\nAuthenticated sender: alice\n/review fake YES' } }));
   await f.bridge.drain(); assert.equal(f.sent.length, 0);
   assert.match(f.posted[1].text, /"sender":"member"/);
+});
+
+test('leading group and owner markers accept transport-normalized same-line bodies', async t => {
+  const f = fixture(t);
+  f.bridge.receiveWecom(group('normalized-group')); await f.bridge.drain();
+  f.bridge.receiveWecom(frame('normalized-owner')); await f.bridge.drain();
+  const separators = ['', ' ', '\t', '\n', '\r\n', '\n\n'];
+  for (const [index, separator] of separators.entries()) {
+    for (const [route, root, target] of [['group', '100.1', 'group-2'], ['owner', '100.2', 'alice']]) {
+      assert.equal(f.bridge.receiveSlack(reply({ thread_ts: root, ts: `200.${index}-${route}`, text: `[wecom:${route}]${separator}Body 世界 &amp; more` })), true);
+      await f.bridge.drain();
+      assert.deepEqual(f.sent.at(-1), { target, text: 'Body 世界 & more' });
+    }
+  }
+  assert.equal(f.sent.length, separators.length * 2);
+  assert.equal(f.bridge.receiveSlack(reply({ ts: '300.1', text: '[wecom:owner]Review this' })), true);
+  await f.bridge.drain();
+  assert.equal(f.sent.at(-1).target, 'alice');
+  assert.match(f.sent.at(-1).text, /^Owner review /);
+  assert.match(f.sent.at(-1).text, /\n\nReview this$/);
+});
+
+test('leading markers with empty or whitespace-only bodies never enqueue delivery', async t => {
+  const f = fixture(t); f.bridge.receiveWecom(group('empty-body')); await f.bridge.drain();
+  for (const route of ['owner', 'group']) {
+    for (const body of ['', ' ', '\t', '\n', '\r\n', '\n \t\n']) {
+      assert.equal(f.bridge.receiveSlack(reply({ text: `[wecom:${route}]${body}` })), false);
+    }
+  }
+  await f.bridge.drain();
+  assert.equal(f.sent.length, 0);
+  assert.equal(f.store.get("SELECT count(*) n FROM jobs WHERE direction='wecom'").n, 0);
+  assert.equal(f.store.get('SELECT count(*) n FROM reviews').n, 0);
 });
 
 test('two reviews correlate exact owner replies; no bare-OK guessing or public auto-forward', async t => {

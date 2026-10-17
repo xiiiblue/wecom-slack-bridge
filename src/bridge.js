@@ -46,7 +46,7 @@ export class Bridge {
         this.store.addJob(id, 'slack', { part: 1, parts: 1, review: review.id, text: `Owner review response | request ${id} | review ${review.id}\nTransport only: interpret the owner's words; no approval or execution is performed by this bridge.\n${envelope(match[2])}` }, 'slack', c.slackChannel);
       } else {
         this.store.run('INSERT INTO requests(id,source,target,created,expires,root,status,kind,owner,channel) VALUES (?,?,?,?,?,NULL,?,?,?,?)', id, source, target, now, now + c.ttlMs, 'pending', kind, c.ownerUser, c.slackChannel);
-        this.store.addJob(id, 'slack', { part: 1, parts: 1, text: `WeCom external text | request ${id}\nReply in this root thread with exact first line [wecom:owner] or [wecom:group]. Owner-only requests prohibit group routing.\n${envelope(text)}` }, 'slack', c.slackChannel);
+        this.store.addJob(id, 'slack', { part: 1, parts: 1, text: `WeCom external text | request ${id}\nReply in this root thread with exact leading marker [wecom:owner] or [wecom:group], followed by the reply body. Owner-only requests prohibit group routing.\n${envelope(text)}` }, 'slack', c.slackChannel);
       }
       return true;
     });
@@ -60,8 +60,9 @@ export class Bridge {
     const now = this.now();
     const request = this.store.get('SELECT * FROM requests WHERE root=? AND expires>=?', event.thread_ts, now);
     if (!request || request.status !== 'sent' || !['single', 'group'].includes(request.kind) || request.owner !== this.config.ownerUser || request.channel !== this.config.slackChannel || Buffer.byteLength(event.text) > 160000) return false;
-    // No trimming, inferred destination, arbitrary target or default/public fallback.
-    const route = /^\[wecom:(owner|group)\]\r?\n([\s\S]+)$/.exec(event.text);
+    // Require an exact leading marker; transports may remove the separating newline.
+    // No leading-text trimming, inferred destination, arbitrary target or default/public fallback.
+    const route = /^\[wecom:(owner|group)\]\s*([\s\S]+)$/.exec(event.text);
     if (!route || !route[2].trim() || (route[1] === 'group' && (request.kind !== 'group' || !this.config.allowedChats.has(request.target)))) return false;
     const source = `slack:${hash(`${event.channel}:${event.ts}`)}`;
     const inserted = this.store.transaction(() => {
