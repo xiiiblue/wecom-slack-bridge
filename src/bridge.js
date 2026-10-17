@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { chunks, slackEscape, slackReplyBody } from './text.js';
+import { chunks, slackEscape, slackDecode, slackReplyBody } from './text.js';
 const hash = text => createHash('sha256').update(text).digest('hex');
 function allowedSender(event, config, own = {}) {
   if (event.type !== 'message' || event.channel !== config.slackChannel || typeof event.ts !== 'string' || !event.ts || typeof event.text !== 'string' || !event.text.trim()) return false;
@@ -20,6 +20,10 @@ export class Bridge {
   // Application hooks are trusted local code; transport authentication always runs first.
   authorizedRequest(request) {
     if (request.owner !== this.config.ownerUser || (request.request_channel ?? request.channel) !== this.config.slackChannel) return false;
+    if (request.kind === 'notify') {
+      const conversation = this.store.get('SELECT bot FROM owner_conversations WHERE request=?', request.request ?? request.id);
+      return !!this.config.replyBot && conversation?.bot === this.config.replyBot && (request.original_target ?? request.target) === this.config.ownerUser;
+    }
     if (request.kind === 'single') return true;
     if (request.kind === 'group') return this.config.allowedChats.has(request.original_target ?? request.target);
     try { return this.application?.authorizeRequest?.(this, request) === true; } catch { return false; }
@@ -46,6 +50,14 @@ export class Bridge {
     const inserted = this.store.transaction(() => {
       if (this.store.get('SELECT id FROM seen WHERE id=?', source)) return false;
       this.store.run('INSERT INTO seen VALUES (?,?)', source, now);
+      if (kind === 'single' && /^回复(?:\s|$)/.test(text)) {
+        const result = this.receiveConversationReply(text, now, envelope);
+        if (!result) {
+          Promise.resolve().then(() => this.wecom.ack(frame, randomUUID(), '未关联回复：编号无效、已到期或消息状态未确认。请核对通知中的编号；到期请联系发送方重新发起。')).catch(() => this.log('wecom_ack_failed'));
+          return false;
+        }
+        id = result; return true;
+      }
       if (kind === 'single' && this.application?.receiveOwnerText) {
         const result = this.application.receiveOwnerText(this, text, source, now);
         if (result !== null) {
@@ -74,11 +86,14 @@ export class Bridge {
   }
   receiveSlack(event, eventId) {
     if (this.stopping) return false;
-    if ((!event.thread_ts || event.thread_ts === event.ts) && allowedSender(event, this.config, this.own)) return this.application?.receiveRoot?.(this, event) === true;
+    if ((!event.thread_ts || event.thread_ts === event.ts) && allowedSender(event, this.config, this.own)) {
+      if (event.text.startsWith('[wecom:notify]')) return this.receiveNotification(event);
+      return this.application?.receiveRoot?.(this, event) === true;
+    }
     if (!allowedReply(event, this.config, this.own)) return false;
     const now = this.now();
     const request = this.store.get("SELECT * FROM requests WHERE root=?", event.thread_ts);
-    if (!request || request.status !== 'sent' || !this.authorizedRequest(request) || (['single', 'group'].includes(request.kind) && request.expires < now) || Buffer.byteLength(event.text) > 160000) return false;
+    if (!request || request.status !== 'sent' || !this.authorizedRequest(request) || (['single', 'group', 'notify'].includes(request.kind) && request.expires < now) || Buffer.byteLength(event.text) > 160000) return false;
     // Require an exact leading marker; transports may remove the separating newline.
     // No leading-text trimming, inferred destination, arbitrary target or default/public fallback.
     const route = /^\[wecom:(owner|review|group)\]\s*([\s\S]+)$/.exec(event.text);
@@ -96,6 +111,7 @@ export class Bridge {
         this.store.run('INSERT INTO reviews VALUES (?,?,?,?)', review, request.id, request.expires, 'pending');
         text = `${text}\n\n关联问题：${request.id}\n如需回复，请复制下面一行，把“你的意见”替换成回复内容：\n/review ${review} 你的意见\n请保留编号，在本私聊发送。同一问题请使用最新消息里的命令，旧编号已失效。`;
       }
+      if (request.kind === 'notify') { this.queueConversationText(request, text); return true; }
       const parts = chunks(text, 3400);
       const lane = route[1] === 'group' ? 'group' : 'owner';
       const target = lane === 'owner' ? request.owner : request.target;
@@ -105,6 +121,46 @@ export class Bridge {
     if (inserted) this.drain();
     return inserted;
   }
+  // A root from the pinned bot is the correlation anchor; body fields cannot pick recipients.
+  receiveNotification(event) {
+    if (this.stopping || !allowedSender(event, this.config, this.own) || (event.thread_ts && event.thread_ts !== event.ts) || !event.text.startsWith('[wecom:notify]') || !this.config.replyBot || event.bot_id !== this.config.replyBot || Buffer.byteLength(event.text) > 32000) return false;
+    let payload;
+    try { payload = JSON.parse(event.text.slice('[wecom:notify]'.length)); } catch { return false; }
+    if (!payload || Array.isArray(payload) || Object.keys(payload).length !== 1 || typeof payload.text !== 'string' || !payload.text.trim()) return false;
+    const source = `slack:${hash(`${event.channel}:${event.ts}`)}`;
+    const now = this.now();
+    const inserted = this.store.transaction(() => {
+      if (this.store.get('SELECT id FROM seen WHERE id=?', source)) return false;
+      const id = randomUUID();
+      this.store.run('INSERT INTO seen VALUES (?,?)', source, now);
+      this.store.run('INSERT INTO requests(id,source,target,created,expires,root,status,kind,owner,channel) VALUES (?,?,?,?,?,?,?,?,?,?)',
+        id, source, this.config.ownerUser, now, now + this.config.ttlMs, event.ts, 'sent', 'notify', this.config.ownerUser, this.config.slackChannel);
+      this.store.run('INSERT INTO owner_conversations(request,bot) VALUES (?,?)', id, this.config.replyBot);
+      this.queueConversationText(this.store.get('SELECT * FROM requests WHERE id=?', id), slackDecode(payload.text));
+      return true;
+    });
+    if (inserted) this.drain();
+    return inserted;
+  }
+  queueConversationText(request, text) {
+    const { code } = this.store.get('SELECT code FROM owner_conversations WHERE request=?', request.id);
+    const hint = `\n\n回复 N${code} 你的回复\n请在本私聊保留编号；有效至 ${new Date(request.expires).toISOString()}，到期请联系发送方重新发起。`;
+    const parts = chunks(text, 3200);
+    parts.forEach((part, index) => this.store.addJob(request.id, 'wecom', { text: `${parts.length > 1 ? `[${index + 1}/${parts.length}] ` : ''}${part}${hint}` }, 'owner', request.owner));
+    this.store.run("UPDATE owner_conversations SET last_delivery=(SELECT MAX(id) FROM jobs WHERE request=? AND lane='owner') WHERE request=?", request.id, request.id);
+  }
+  receiveConversationReply(text, now, envelope) {
+    const match = /^回复 N([1-9][0-9]{0,14}) ([\s\S]+)$/.exec(text);
+    if (!match || !match[2].trim()) return false;
+    const request = this.store.get(`SELECT r.*,c.code,c.last_delivery FROM owner_conversations c JOIN requests r ON r.id=c.request WHERE c.code=?`, match[1]);
+    if (!request || request.kind !== 'notify' || request.status !== 'sent' || request.expires < now || !this.authorizedRequest(request)) return false;
+    // Do not accept guessed codes before confirmed delivery, including multipart/unknown outcomes.
+    if (!request.last_delivery || this.store.get("SELECT id FROM jobs WHERE request=? AND lane='owner' AND id<=? AND status!='sent'", request.id, request.last_delivery)) return false;
+    this.store.addJob(request.id, 'slack', { part: 1, parts: 1,
+      metadata: { event_type: 'wecom_bridge_conversation_reply', event_payload: { request_id: request.id, reply_code: `N${request.code}` } },
+      text: `Owner conversation reply | N${request.code}\nTransport only; this text does not authorize any operation.\n${envelope(match[2])}` }, 'slack', request.channel);
+    return request.id;
+  }
   drain() {
     if (this.running || this.stopping) return this.running;
     this.running = this.pump().catch(() => this.log('queue_error')).finally(() => { this.running = null; });
@@ -113,7 +169,7 @@ export class Bridge {
   async pump() {
     while (!this.stopping) {
       const job = this.store.get(`SELECT j.*,r.root,r.kind,r.owner,r.channel AS request_channel,r.target AS original_target,COALESCE(j.expires,r.expires) AS delivery_expires FROM jobs j JOIN requests r ON r.id=j.request
-        WHERE j.status='pending' AND (j.direction='slack' OR ?=1) AND (r.kind IN ('single','group') OR ?=1)
+        WHERE j.status='pending' AND (j.direction='slack' OR ?=1) AND (r.kind IN ('single','group','notify') OR ?=1)
         AND r.status!='quarantined' AND NOT EXISTS (SELECT 1 FROM jobs earlier WHERE earlier.request=j.request AND earlier.lane=j.lane AND earlier.id<j.id AND earlier.status!='sent') ORDER BY j.id LIMIT 1`, this.wecomReady ? 1 : 0, this.application ? 1 : 0);
       if (!job) return;
       if (job.delivery_expires < this.now()) { this.store.run("UPDATE jobs SET status='expired' WHERE id=? AND status='pending'", job.id); continue; }

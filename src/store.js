@@ -26,6 +26,9 @@ export class Store {
       if (!this.all('PRAGMA table_info(jobs)').some(x => x.name === 'expires')) this.db.exec('ALTER TABLE jobs ADD COLUMN expires INTEGER');
       this.db.exec(`CREATE TABLE IF NOT EXISTS reviews (id TEXT PRIMARY KEY, request TEXT NOT NULL, expires INTEGER NOT NULL, status TEXT NOT NULL)`);
     });
+    this.db.exec(`CREATE TABLE IF NOT EXISTS owner_conversations (
+      code INTEGER PRIMARY KEY AUTOINCREMENT, request TEXT NOT NULL UNIQUE,
+      bot TEXT NOT NULL, last_delivery INTEGER NOT NULL DEFAULT 0)`);
     this.db.exec("UPDATE jobs SET status='unknown' WHERE status='sending'");
   }
   transaction(fn) { this.db.exec('BEGIN IMMEDIATE'); try { const value = fn(); this.db.exec('COMMIT'); return value; } catch (e) { this.db.exec('ROLLBACK'); throw e; } }
@@ -35,9 +38,10 @@ export class Store {
   addJob(id, direction, payload, lane = direction, target = null, expires = null) { this.run('INSERT INTO jobs(request,direction,payload,lane,target,expires) VALUES (?,?,?,?,?,?)', id, direction, JSON.stringify(payload), lane, target, expires); }
   prune(now) {
     this.transaction(() => {
+      this.run("DELETE FROM owner_conversations WHERE request IN (SELECT id FROM requests WHERE kind='notify' AND expires < ?)", now);
       this.run('DELETE FROM reviews WHERE expires < ?', now);
-      this.run("DELETE FROM jobs WHERE expires < ? OR request IN (SELECT id FROM requests WHERE kind IN ('single','group','legacy') AND expires < ?)", now, now);
-      this.run("DELETE FROM requests WHERE kind IN ('single','group','legacy') AND expires < ?", now);
+      this.run("DELETE FROM jobs WHERE expires < ? OR request IN (SELECT id FROM requests WHERE kind IN ('single','group','legacy','notify') AND expires < ?)", now, now);
+      this.run("DELETE FROM requests WHERE kind IN ('single','group','legacy','notify') AND expires < ?", now);
       this.run('DELETE FROM seen WHERE created < ?', now - 7 * 86400000);
     });
   }
