@@ -177,3 +177,7 @@ Slack 文本必须从精确的 `[wecom:issue]` 开始，随后是一个 JSON 对
 上线前完成 [人工验收清单](docs/ACCEPTANCE.md)，分别记录单元测试、配置检查和真实端到端结果。不要把“进程启动成功”当作“dot 已能回复”。
 
 贡献请阅读 [CONTRIBUTING](docs/CONTRIBUTING.md)。许可证：[MIT](LICENSE)。
+
+## 工作流控制基础（未接入运行）
+
+[Issue 工作流说明](docs/WORKFLOW.md) 定义手动与限时自动模式、停止规则、版本化执行授权、额度门槛和任务占用。`src/workflow-control.js` 是独立测试的准备模块，没有接入桥接入口、扫描调度或开发执行器；现有审批仍仅记录决定。发布此模块不会开启自动开发。
