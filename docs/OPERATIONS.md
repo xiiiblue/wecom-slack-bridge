@@ -65,6 +65,6 @@ unknown 先核对真实两端结果；不能通过改数据库、重建根消息
 
 修复、升级与回退统一见 [部署维护](../deploy/README.md)。环境证据按日期、固定提交、ACK/实际可见/真实往返分层记录，参照 [人工清单](ACCEPTANCE.md)。
 
-## 可选图片故障
+## 可选附件故障
 
-`image_ingress_failed` 只说明受限下载/解密/缓存失败；`delivery_unknown` 的 attachments/images_ready 阶段说明外部副作用可能已发生。核验原根和真实文件，不重放。没有内存缓存的重启任务不能报告图片成功，回退须先核对并隔离未完成图片任务，详见[图片附件](IMAGES.md)。
+`attachment_ingress_failed` 只说明受限下载/解密/缓存失败；`delivery_unknown` 的 attachments/attachments_ready 阶段说明外部副作用可能已发生。核验原根和真实文件，不重放。没有内存缓存的重启入站任务不能报告附件成功，回退须先核对并隔离未完成附件任务，详见[图片附件](ATTACHMENTS.md)。

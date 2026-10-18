@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { validImageHost } from './images.js';
+import { validDownloadHost } from './attachments.js';
 export function loadConfig(env = process.env) {
   const required = key => { const value = env[key]?.trim(); if (!value) throw new Error(`Missing ${key}`); return value; };
   const list = key => new Set((env[key] || '').split(',').map(x => x.trim()).filter(Boolean));
@@ -11,11 +11,12 @@ export function loadConfig(env = process.env) {
     slackChannel: required('SLACK_CHANNEL_ID'), replyBot: env.SLACK_REPLY_BOT_ID?.trim(), replyUser: env.SLACK_REPLY_USER_ID?.trim(),
     stateDir: resolve(env.STATE_DIR || './data'), ttlMs: integer('REPLY_TTL_SECONDS', 3600, 86400) * 1000,
     maxBytes: integer('MAX_MESSAGE_BYTES', 32000, 32000),
-    imagesEnabled: env.WECOM_GROUP_IMAGES_ENABLED === 'true', imageUsers: list('WECOM_IMAGE_ALLOWED_USER_IDS'),
-    imageHosts: list('WECOM_IMAGE_DOWNLOAD_HOSTS'), imageMaxCount: integer('MAX_IMAGES_PER_MESSAGE', 1, 3),
+    attachmentsEnabled: env.WECOM_ATTACHMENTS_ENABLED === 'true', attachmentRepliesEnabled: env.WECOM_ATTACHMENT_REPLIES_ENABLED === 'true', attachmentUsers: list('WECOM_ATTACHMENT_ALLOWED_USER_IDS'),
+    attachmentHosts: list('WECOM_ATTACHMENT_DOWNLOAD_HOSTS'), attachmentMaxCount: integer('MAX_ATTACHMENTS_PER_MESSAGE', 1, 3),
   };
-  if (env.WECOM_GROUP_IMAGES_ENABLED && !['true','false'].includes(env.WECOM_GROUP_IMAGES_ENABLED)) throw new Error('Invalid WECOM_GROUP_IMAGES_ENABLED');
-  if (config.imagesEnabled && (!config.imageUsers.size || !config.imageHosts.size || [...config.imageHosts].some(host => !validImageHost(host)))) throw new Error('Images require explicit sender and verified official download host allowlists');
+  if (env.WECOM_ATTACHMENT_REPLIES_ENABLED && !['true','false'].includes(env.WECOM_ATTACHMENT_REPLIES_ENABLED)) throw new Error('Invalid WECOM_ATTACHMENT_REPLIES_ENABLED');
+  if (env.WECOM_ATTACHMENTS_ENABLED && !['true','false'].includes(env.WECOM_ATTACHMENTS_ENABLED)) throw new Error('Invalid WECOM_ATTACHMENTS_ENABLED');
+  if (config.attachmentsEnabled && (!config.attachmentUsers.size || !config.attachmentHosts.size || [...config.attachmentHosts].some(host => !validDownloadHost(host)))) throw new Error('Images require explicit sender and verified official download host allowlists');
   if (!config.allowedChats.size) throw new Error('WECOM_ALLOWED_CHAT_IDS must not be empty');
   if (config.allowedChats.has(config.ownerUser)) throw new Error('Owner ID must not be a group destination');
   if (Boolean(config.replyBot) === Boolean(config.replyUser)) throw new Error('Set exactly one SLACK_REPLY_BOT_ID or SLACK_REPLY_USER_ID');
