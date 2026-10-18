@@ -8,10 +8,12 @@ export function createStreamDemo({ env = process.env, config, store, replyStream
   const phrase = env.WECOM_STREAM_DEMO_PHRASE;
   const start = env.WECOM_STREAM_DEMO_STARTS_AT;
   const end = env.WECOM_STREAM_DEMO_EXPIRES_AT;
-  if (phrase === undefined && start === undefined && end === undefined) return null;
+  const mentionName = env.WECOM_STREAM_DEMO_MENTION_NAME;
+  if (phrase === undefined && start === undefined && end === undefined && mentionName === undefined) return null;
   const startsAt = Date.parse(start), expiresAt = Date.parse(end);
   if (typeof phrase !== 'string' || phrase.length < 12 || phrase.length > 100 || phrase.trim() !== phrase || /[\r\n]/.test(phrase)
     || !Number.isFinite(startsAt) || !Number.isFinite(expiresAt) || startsAt <= 0 || expiresAt <= startsAt || expiresAt - startsAt > 30 * 60000
+    || (mentionName !== undefined && (typeof mentionName !== 'string' || !mentionName || mentionName.length > 80 || mentionName.trim() !== mentionName || /[@\r\n]/.test(mentionName)))
     || config.allowedChats.size !== 1) throw new Error('Invalid bounded stream demo configuration');
   const [chat] = config.allowedChats;
   const claim = `stream-demo:${hash(`${config.wecomBotId}:${chat}:${phrase}:${startsAt}`)}`;
@@ -40,7 +42,9 @@ export function createStreamDemo({ env = process.env, config, store, replyStream
     receive(frame) {
       const b = frame?.body;
       if (b?.aibotid !== config.wecomBotId || b.chattype !== 'group' || b.chatid !== chat
-        || b.from?.userid !== config.ownerUser || b.msgtype !== 'text' || b.text?.content !== phrase) return false;
+        || b.from?.userid !== config.ownerUser || b.msgtype !== 'text') return false;
+      // Only the configured bot mention is accepted; text never authenticates the sender.
+      if (b.text?.content !== phrase && !(mentionName && b.text?.content === `@${mentionName} ${phrase}`)) return false;
       // Matching demo text is isolated even after expiry/consumption: no normal ack or Slack root.
       const time = now();
       if (stopping || time < startsAt || time >= expiresAt) { log('stream_demo_inactive'); return true; }

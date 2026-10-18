@@ -35,6 +35,7 @@ test('demo is disabled by default; partial, unbounded and multiple-group configu
     assert.throws(() => createStreamDemo({ env: demoEnv, config }));
   }
   assert.throws(() => createStreamDemo({ env, config: { ...config, allowedChats: new Set(['a', 'b']) } }));
+  for (const name of ['', '@Test Bot', 'Test Bot\n', ' Test Bot']) assert.throws(() => createStreamDemo({ env: { ...env, WECOM_STREAM_DEMO_MENTION_NAME: name }, config }));
 });
 
 test('fresh matching callback updates the same stream and request, exclusively without normal ack or Slack', async t => {
@@ -69,6 +70,28 @@ test('duplicate and second fresh callback cannot consume the demonstration twice
   await f.restartDemo();
   assert.equal(f.demo.receive(frame('third')), true); await f.demo.drain();
   assert.equal(f.streams.length, 2);
+});
+
+test('configured bot mention plus exact phrase is exclusive; other names and quoted prefixes do not match', async t => {
+  const f = fixture(t, { env: { ...env, WECOM_STREAM_DEMO_MENTION_NAME: 'Test Assistant' } });
+  for (const content of [`@Other ${phrase}`, `quote @Test Assistant ${phrase}`, `@Test Assistant  ${phrase}`, `@Test Assistant ${phrase} extra`]) {
+    assert.equal(f.demo.receive(frame('wrong-prefix', { text: { content } })), false);
+  }
+  const message = frame('with-mention', { text: { content: `@Test Assistant ${phrase}` } });
+  assert.equal(f.demo.receive({ ...message, body: { ...message.body, from: { userid: 'other-member' } } }), false);
+  assert.equal(f.bridge.receiveWecom(message), true); await f.demo.drain(); await f.bridge.drain();
+  assert.equal(f.streams.length, 2);
+  assert.deepEqual([f.acks.length, f.posts.length], [0, 0]);
+  assert.deepEqual(f.streams.map(x => x[3]), [false, true]);
+});
+
+test('adding the mention matcher cannot replay a previously normally forwarded callback', async t => {
+  const f = fixture(t);
+  const message = frame('old-prefix', { text: { content: `@Test Assistant ${phrase}` } });
+  f.bridge.receiveWecom(message); await f.bridge.drain(); assert.equal(f.posts.length, 1);
+  const repaired = createStreamDemo({ env: { ...env, WECOM_STREAM_DEMO_MENTION_NAME: 'Test Assistant' }, config, store: f.store, now: () => initial, wait: async () => {}, replyStream: async () => { assert.fail('old event replayed'); } });
+  assert.equal(repaired.receive(message), true); await repaired.drain(); await repaired.stop();
+  assert.equal(f.store.get("SELECT count(*) n FROM seen WHERE id LIKE 'stream-demo:%'").n, 0);
 });
 
 test('old, future, missing timestamp and missing real request id callbacks do not claim or send', async t => {
