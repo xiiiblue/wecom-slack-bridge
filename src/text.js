@@ -45,7 +45,9 @@ export function slackReplyBody(event, route) {
   if (!candidate) return fallback;
   const body = slackDecode(candidate[2]);
   const normalized = text => text.replace(/\s+/g, ' ').trim();
-  return normalized(body) === normalized(fallback) ? body : fallback;
+  if (normalized(body) !== normalized(fallback)) return fallback;
+  // Preserve existing layout; blocks may only enrich a body with no line breaks.
+  return /[\r\n]/.test(fallback) || !/[\r\n]/.test(body) ? fallback : body;
 }
 
 // Display only: fixed UTC+08:00, independent of the host TZ. Keep stored epoch unchanged.

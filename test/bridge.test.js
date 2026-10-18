@@ -637,3 +637,26 @@ test('ACK followed by local persistence failure stays unknown without replay or 
   assert.ok(!JSON.stringify(f.logs).includes('confidential'));
   await f.restart(); await f.bridge.drain(); assert.equal(f.sent.length, 1);
 });
+
+test('multiline Slack text is not flattened or reformatted by matching rich text blocks', async t => {
+  const f = fixture(t); f.bridge.receiveWecom(frame('preserve-original-lines')); await f.bridge.drain();
+  const body = '第一段\n第二行\n\n1. 项目一\n  说明\r\n最后一行\n';
+  for (const [index, candidate] of [body.replace(/\s+/g, ' ').trim(), body.replace(/\n\n/g, '\n').replace(/  /g, ' '), body.replace(/\n/g, '\n\n')].entries()) {
+    assert.equal(f.bridge.receiveSlack(reply({ ts: `700.${index}`, text: '[wecom:owner]\n'+body, blocks: richText(['[wecom:owner]\n'+candidate]) })), true);
+    await f.bridge.drain(); assert.equal(f.sent.at(-1).text, body);
+  }
+});
+
+test('LF-free text keeps original spacing when blocks add no line breaks', async t => {
+  const f = fixture(t); f.bridge.receiveWecom(frame('preserve-original-spacing')); await f.bridge.drain();
+  assert.equal(f.bridge.receiveSlack(reply({ text: '[wecom:owner]First   second', blocks: richText(['[wecom:owner]First second']) })), true);
+  await f.bridge.drain(); assert.equal(f.sent[0].text, 'First   second');
+});
+
+test('preserving original newlines does not bypass conflicting rich text route rejection', async t => {
+  const f = fixture(t); f.bridge.receiveWecom(group('newline-route-boundary')); await f.bridge.drain();
+  for (const marker of ['group','review','unknown']) {
+    assert.equal(f.bridge.receiveSlack(reply({ text: '[wecom:owner]\nFirst\nSecond', blocks: richText([`[wecom:${marker}]\nFirst\nSecond`]) })), false);
+  }
+  assert.equal(f.sent.length,0); assert.equal(f.store.get("SELECT count(*) n FROM jobs WHERE direction='wecom'").n,0);
+});
