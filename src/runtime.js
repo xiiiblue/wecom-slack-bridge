@@ -3,12 +3,13 @@ import AiBot from '@wecom/aibot-node-sdk';
 import { loadConfig } from './config.js';
 import { Store } from './store.js';
 import { Bridge } from './bridge.js';
+import { createStreamDemo } from './stream-demo.js';
 
 // SDK logs can include frames, signed URLs, and tokens. Never forward their arguments.
 const log = (event, fields = {}) => console.log(JSON.stringify({ time: new Date().toISOString(), event, ...fields }));
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, setLevel() {}, getLevel: () => LogLevel.ERROR, setName() {} };
 export async function startBridge({ createApplication } = {}) {
-  let store, app, wecom, bridge, health, stopping = false;
+  let store, app, wecom, bridge, streamDemo, health, stopping = false;
   let startupStage = 'config';
   async function shutdown(code = 0) {
     if (stopping) return;
@@ -17,6 +18,7 @@ export async function startBridge({ createApplication } = {}) {
     try {
       // Keep connections alive briefly to finish the one in-flight send.
       await bridge?.stop();
+      await streamDemo?.stop();
       wecom?.disconnect();
       await app?.stop();
       store?.close();
@@ -38,7 +40,10 @@ export async function startBridge({ createApplication } = {}) {
     const identity = await app.client.auth.test();
     if (!identity.ok || !identity.user_id || !identity.bot_id) throw new Error('Cannot verify bridge identity');
     if (config.replyBot === identity.bot_id || config.replyUser === identity.user_id) { startupStage = 'identity'; throw new Error('Responder must not be bridge identity'); }
-    bridge = new Bridge({ config, store, application, own: { bot: identity.bot_id, user: identity.user_id }, log,
+    startupStage = 'stream_demo';
+    streamDemo = createStreamDemo({ config, store, log, replyStream: (...args) => wecom.replyStream(...args) });
+    startupStage = 'connect';
+    bridge = new Bridge({ config, store, application, streamDemo, own: { bot: identity.bot_id, user: identity.user_id }, log,
       slack: { post: params => app.client.chat.postMessage(params) },
       wecom: {
         ack: (frame, id, text = '已收到，正在转交。回复将另行送达。') => wecom.replyStream(frame, id, text, true),
