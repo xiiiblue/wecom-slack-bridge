@@ -8,6 +8,7 @@ import { Store } from '../src/store.js';
 import { Bridge, allowedReply } from '../src/bridge.js';
 import { loadConfig } from '../src/config.js';
 import { chunks } from '../src/text.js';
+import { createWecomTransport } from '../src/runtime.js';
 
 const config = { wecomBotId: 'test-bot', ownerUser: 'alice', allowedChats: new Set(['group-2']), slackChannel: 'C123', replyBot: 'BDOT', ttlMs: 3600000, maxBytes: 32000 };
 const frame = (id = 'm1', user = 'alice', extra = {}) => ({ headers: { req_id: `r-${id}` }, body: { aibotid: 'test-bot', msgid: id, msgtype: 'text', chattype: 'single', from: { userid: user }, text: { content: 'Hello 世界 😀' }, ...extra } });
@@ -40,6 +41,37 @@ test('allowlisted text roundtrip maps only original thread to original user', as
   assert.equal(f.bridge.receiveSlack(reply({ thread_ts: '999.9' }), 'Ev0'), false);
   assert.equal(f.bridge.receiveSlack(reply(), 'Ev1'), true); await f.bridge.drain();
   assert.deepEqual(f.sent, [{ target: 'alice', text: 'Reply 世界 😀' }]);
+});
+
+test('traditional receipt is short, contains no original text and is sent only once per msgid across restart', async t => {
+  const receipts = [], outgoing = [];
+  const transport = createWecomTransport({ replyStream: async (...args) => { receipts.push(args); return { errcode: 0 }; }, sendMessage: async (...args) => { outgoing.push(args); return { errcode: 0 }; } });
+  const f = fixture(t, { wecom: transport });
+  const message = frame('receipt-once', 'member', { chattype: 'group', chatid: 'group-2', text: { content: 'Original private-looking user text' } });
+  assert.equal(f.bridge.receiveWecom(message), true);
+  assert.equal(f.bridge.receiveWecom(message), false); await f.bridge.drain();
+  assert.equal(receipts.length, 1); assert.equal(f.posted.length, 1);
+  assert.equal(receipts[0][0], message); assert.equal(receipts[0][2], '收到，稍等'); assert.equal(receipts[0][3], true);
+  assert.ok(!receipts[0][2].includes(message.body.text.content));
+  await f.restart(); assert.equal(f.bridge.receiveWecom(message), false); await f.bridge.drain();
+  assert.equal(receipts.length, 1);
+  assert.equal(f.bridge.receiveWecom(frame('another-msgid', 'member', { chattype: 'group', chatid: 'group-2' })), true); await f.bridge.drain();
+  assert.equal(receipts.length, 2);
+  await transport.send('group-2', 'Plain final answer');
+  assert.deepEqual(outgoing, [['group-2', { msgtype: 'markdown', markdown: { content: 'Plain final answer' } }]]);
+});
+
+test('unknown receipt result is not retried for duplicate msgid or restart; explicit errors retain their text', async t => {
+  const receipts = [];
+  const transport = createWecomTransport({ replyStream: async (...args) => { receipts.push(args); throw new Error('uncertain delivery'); } });
+  const f = fixture(t, { wecom: transport });
+  const message = frame('unknown-receipt');
+  f.bridge.receiveWecom(message); await f.bridge.drain();
+  assert.equal(receipts.length, 1);
+  await f.restart(); assert.equal(f.bridge.receiveWecom(message), false); await f.bridge.drain();
+  assert.equal(receipts.length, 1);
+  await assert.rejects(transport.ack(message, 'error-id', 'Message too long'));
+  assert.equal(receipts[1][2], 'Message too long');
 });
 
 test('per-message mapping prevents conversation cross-talk', async t => {

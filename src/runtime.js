@@ -7,6 +7,12 @@ import { Bridge } from './bridge.js';
 // SDK logs can include frames, signed URLs, and tokens. Never forward their arguments.
 const log = (event, fields = {}) => console.log(JSON.stringify({ time: new Date().toISOString(), event, ...fields }));
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, setLevel() {}, getLevel: () => LogLevel.ERROR, setName() {} };
+export function createWecomTransport(client) {
+  return {
+    ack: (frame, id, text = '收到，稍等') => client.replyStream(frame, id, text, true),
+    send: (target, text) => client.sendMessage(target, { msgtype: 'markdown', markdown: { content: text } }),
+  };
+}
 export async function startBridge({ createApplication } = {}) {
   let store, app, wecom, bridge, health, stopping = false;
   let startupStage = 'config';
@@ -40,10 +46,7 @@ export async function startBridge({ createApplication } = {}) {
     if (config.replyBot === identity.bot_id || config.replyUser === identity.user_id) { startupStage = 'identity'; throw new Error('Responder must not be bridge identity'); }
     bridge = new Bridge({ config, store, application, own: { bot: identity.bot_id, user: identity.user_id }, log,
       slack: { post: params => app.client.chat.postMessage(params) },
-      wecom: {
-        ack: (frame, id, text = '已收到，正在转交。回复将另行送达。') => wecom.replyStream(frame, id, text, true),
-        send: (target, text) => wecom.sendMessage(target, { msgtype: 'markdown', markdown: { content: text } }),
-      } });
+      wecom: createWecomTransport(wecom) });
     app.event('message', async ({ event, body }) => { if (!stopping) bridge.receiveSlack(event, body.event_id); });
     app.error(async () => log('slack_error'));
     wecom.on('message.text', frame => {
