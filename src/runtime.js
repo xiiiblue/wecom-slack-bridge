@@ -54,7 +54,7 @@ export async function startBridge({ createApplication } = {}) {
     });
     wecom.on('authenticated', () => { bridge.wecomReady = true; log('wecom_authenticated'); bridge.drain(); });
     wecom.on('disconnected', () => { bridge.wecomReady = false; log('wecom_disconnected'); });
-    wecom.on('reconnecting', attempt => log('wecom_reconnecting', { attempt }));
+    wecom.on('reconnecting', attempt => { bridge.wecomReady = false; log('wecom_reconnecting', { attempt }); });
     wecom.on('error', error => {
       log('wecom_error');
       if (error.code === 'WS_RECONNECT_EXHAUSTED') void shutdown(1);

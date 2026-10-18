@@ -567,3 +567,73 @@ test('application initialization is explicit and handled owner text is not also 
   assert.equal(f.posted[0].thread_ts, '100.1');
   assert.equal(f.store.get('SELECT count(*) n FROM requests').n, 1);
 });
+
+test('active WeCom multipart sends are conservatively paced across requests', async t => {
+  const waits = []; const f = fixture(t, { wait: async ms => waits.push(ms) });
+  f.bridge.receiveWecom(frame('paced-output')); await f.bridge.drain(); waits.length = 0;
+  f.bridge.receiveSlack(reply({ text: '[wecom:owner]' + 'x'.repeat(7000) })); await f.bridge.drain();
+  assert.equal(f.sent.length, 3); assert.equal(waits[0], 0);
+  assert.ok(waits.slice(1).every(ms => ms > 3500 && ms <= 4000));
+  f.bridge.receiveSlack(reply({ ts: '100.3', text: '[wecom:owner]next' })); await f.bridge.drain();
+  assert.ok(waits.at(-1) > 3500);
+});
+
+test('TTL, stop and connection readiness are rechecked after WeCom pacing', async t => {
+  for (const boundary of ['expiry', 'stop', 'disconnect']) {
+    let paused = false;
+    const f = fixture(t, { wait: async () => {
+      if (!paused) return;
+      if (boundary === 'expiry') f.advance(config.ttlMs + 1);
+      if (boundary === 'stop') f.bridge.stopping = true;
+      if (boundary === 'disconnect') f.bridge.wecomReady = false;
+    } });
+    f.bridge.receiveWecom(frame(boundary)); await f.bridge.drain(); paused = true;
+    f.bridge.receiveSlack(reply()); await f.bridge.drain(); assert.equal(f.sent.length, 0);
+    assert.equal(f.store.get("SELECT status FROM jobs WHERE direction='wecom'").status, boundary === 'expiry' ? 'expired' : 'pending');
+    if (boundary === 'disconnect') { paused = false; f.bridge.wecomReady = true; await f.bridge.drain(); assert.equal(f.sent.length, 1); }
+  }
+});
+
+test('corrupt outbox payload is isolated without blocking other requests or logging content', async t => {
+  const f = fixture(t);
+  f.bridge.receiveWecom(frame('corrupt')); await f.bridge.drain();
+  f.bridge.receiveWecom(frame('healthy')); await f.bridge.drain();
+  f.bridge.wecomReady = false;
+  f.bridge.receiveSlack(reply({ text: '[wecom:owner]sensitive synthetic payload' }));
+  f.bridge.receiveSlack(reply({ thread_ts: '100.2', ts: '200.2', text: '[wecom:owner]healthy reply' }));
+  await f.bridge.drain();
+  f.store.run("UPDATE jobs SET payload='not JSON sensitive synthetic payload' WHERE id=(SELECT MIN(id) FROM jobs WHERE direction='wecom')");
+  f.bridge.wecomReady = true; await f.bridge.drain();
+  assert.deepEqual(f.sent, [{ target: 'alice', text: 'healthy reply' }]);
+  assert.deepEqual(f.store.all("SELECT status FROM jobs WHERE direction='wecom' ORDER BY id").map(x => x.status), ['unknown', 'sent']);
+  assert.ok(f.logs.some(([event, fields]) => event === 'delivery_unknown' && fields.stage === 'payload'));
+  assert.ok(!JSON.stringify(f.logs).includes('sensitive synthetic payload'));
+  await f.restart(); await f.bridge.drain(); assert.equal(f.sent.length, 1);
+});
+
+test('concurrent drain calls and duplicate ingress share one active pump', async t => {
+  let release; const gate = new Promise(resolve => { release = resolve; }); let posts = 0;
+  t.after(() => release());
+  const f = fixture(t, { slack: { post: async () => { posts++; if (posts === 1) await gate; return { ok: true, ts: `100.${posts}` }; } } });
+  f.bridge.receiveWecom(frame('concurrent-one'));
+  const first = f.bridge.drain();
+  assert.equal(f.bridge.receiveWecom(frame('concurrent-one')), false);
+  assert.equal(f.bridge.receiveWecom(frame('concurrent-two')), true);
+  assert.equal(f.bridge.drain(), first);
+  release(); await first;
+  assert.equal(posts, 2); assert.equal(f.store.get("SELECT count(*) n FROM jobs WHERE status='sent'").n, 2);
+});
+
+test('ACK followed by local persistence failure stays unknown without replay or raw error logging', async t => {
+  const f = fixture(t); f.bridge.receiveWecom(frame('persist-failure')); await f.bridge.drain();
+  const run = f.store.run.bind(f.store);
+  f.store.run = (sql, ...args) => {
+    if (sql.includes("status='sent'")) throw new Error('synthetic confidential database failure');
+    return run(sql, ...args);
+  };
+  f.bridge.receiveSlack(reply()); await f.bridge.drain();
+  assert.equal(f.sent.length, 1); assert.equal(f.store.get("SELECT status FROM jobs WHERE direction='wecom'").status, 'unknown');
+  assert.ok(f.logs.some(([event, fields]) => event === 'delivery_unknown' && fields.stage === 'persistence'));
+  assert.ok(!JSON.stringify(f.logs).includes('confidential'));
+  await f.restart(); await f.bridge.drain(); assert.equal(f.sent.length, 1);
+});

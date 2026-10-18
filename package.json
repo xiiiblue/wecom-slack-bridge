@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env src/main.js",
     "test": "node --test",
-    "check": "node --check src/main.js && node --check src/runtime.js && node --test"
+    "check": "node scripts/check-repo.js && node --test",
+    "config:check": "node --env-file-if-exists=.env scripts/check-config.js"
   },
   "license": "MIT",
   "dependencies": {

@@ -15,7 +15,7 @@ export function allowedReply(event, config, own = {}) {
 export class Bridge {
   constructor({ config, store, slack, wecom, log = () => {}, now = Date.now, own = {}, wait = delay, application = null }) {
     Object.assign(this, { config, store, slack, wecom, log, now, own, wait, application });
-    this.running = null; this.stopping = false; this.wecomReady = false; this.lastSlackAt = 0;
+    this.running = null; this.stopping = false; this.wecomReady = false; this.lastSlackAt = 0; this.lastWecomAt = -Infinity;
   }
   // Application hooks are trusted local code; transport authentication always runs first.
   authorizedRequest(request) {
@@ -180,16 +180,31 @@ export class Bridge {
         if (job.delivery_expires < this.now()) continue;
         this.lastSlackAt = Date.now();
       }
-      const payload = JSON.parse(job.payload);
+      if (job.direction === 'wecom') {
+        // Conservative global pacing for active messages, including multipart replies.
+        // Callback receipts share platform quotas but are not delayed by this outbox.
+        await this.wait(Math.max(0, 4000 - (performance.now() - this.lastWecomAt)));
+        if (this.stopping) return;
+        if (job.delivery_expires < this.now()) continue;
+        if (!this.wecomReady) return;
+        this.lastWecomAt = performance.now();
+      }
       // Persist intent BEFORE network I/O. A crash or uncertain result must never cause blind replay.
       this.store.run("UPDATE jobs SET status='sending' WHERE id=?", job.id);
+      let stage = 'payload';
       try {
+        const payload = JSON.parse(job.payload);
+        if (!payload || typeof payload.text !== 'string' || !payload.text.trim()) throw new Error('Invalid outbox payload');
+        stage = 'authorization';
         if (!this.authorizedRequest(job)) throw new Error('Request no longer authorized');
         if (job.direction === 'slack') {
           if (job.target !== job.request_channel || job.target !== this.config.slackChannel) throw new Error('Invalid pinned Slack channel');
+          stage = 'transport';
           const result = await this.slack.post({ channel: job.target, text: payload.text, ...(job.root ? { thread_ts: job.root } : {}), mrkdwn: false, parse: 'none', link_names: false, unfurl_links: false, unfurl_media: false,
             metadata: payload.metadata || { event_type: payload.review ? 'wecom_bridge_owner_response' : 'wecom_bridge_request', event_payload: { request_id: job.request, part: payload.part, parts: payload.parts, ...(payload.review ? { review_id: payload.review } : {}) } } });
+          stage = 'acknowledgment';
           if (!result?.ok || !result.ts) throw new Error('Invalid Slack acknowledgment');
+          stage = 'persistence';
           this.store.transaction(() => {
             if (!job.root) this.store.run('UPDATE requests SET root=? WHERE id=?', result.ts, job.request);
             this.store.run("UPDATE jobs SET status='sent',payload='{}' WHERE id=?", job.id);
@@ -198,14 +213,17 @@ export class Bridge {
         } else {
           // Revalidate pinned destinations after restart/config changes; never retarget.
           if (!(job.lane === 'owner' && job.target === job.owner && job.target === this.config.ownerUser) && !(job.lane === 'group' && job.kind === 'group' && job.target === job.original_target && this.config.allowedChats.has(job.target))) throw new Error('Invalid pinned target');
+          stage = 'transport';
           const result = await this.wecom.send(job.target, payload.text);
+          stage = 'acknowledgment';
           if (result?.errcode !== 0) throw new Error('Invalid WeCom acknowledgment');
+          stage = 'persistence';
           this.store.run("UPDATE jobs SET status='sent',payload='{}' WHERE id=?", job.id);
         }
         this.log('delivery_sent', { request: job.request, direction: job.direction });
       } catch {
         this.store.run("UPDATE jobs SET status='unknown' WHERE id=?", job.id);
-        this.log('delivery_unknown', { request: job.request, direction: job.direction });
+        this.log('delivery_unknown', { request: job.request, direction: job.direction, stage });
       }
     }
   }
