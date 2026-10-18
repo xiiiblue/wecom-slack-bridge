@@ -13,8 +13,8 @@ export function allowedReply(event, config, own = {}) {
   return !!event.thread_ts && event.thread_ts !== event.ts && allowedSender(event, config, own);
 }
 export class Bridge {
-  constructor({ config, store, slack, wecom, log = () => {}, now = Date.now, own = {}, wait = delay, application = null, streamDemo = null }) {
-    Object.assign(this, { config, store, slack, wecom, log, now, own, wait, application, streamDemo });
+  constructor({ config, store, slack, wecom, log = () => {}, now = Date.now, own = {}, wait = delay, application = null }) {
+    Object.assign(this, { config, store, slack, wecom, log, now, own, wait, application });
     this.running = null; this.stopping = false; this.wecomReady = false; this.lastSlackAt = 0;
   }
   // Application hooks are trusted local code; transport authentication always runs first.
@@ -39,7 +39,6 @@ export class Bridge {
     const target = kind === 'single' ? c.ownerUser : b.chatid;
     const text = b.text?.content;
     if (typeof text !== 'string' || !text.trim()) return false;
-    if (this.streamDemo?.receive(frame)) return true;
     const provenance = JSON.stringify({ platform: 'WeCom', sender: b.from.userid, chat_type: kind, chat_id: kind === 'group' ? b.chatid : null });
     if (Buffer.byteLength(text) > c.maxBytes || Buffer.byteLength(slackEscape(text + provenance)) > 30000) {
       Promise.resolve().then(() => this.wecom.ack(frame, randomUUID(), '消息过长，未转发。请拆成更短的消息后重试。')).catch(() => this.log('wecom_ack_failed'));
