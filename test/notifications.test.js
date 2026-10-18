@@ -22,7 +22,7 @@ function fixture(t, extra = {}) {
 }
 test('proactive fixed-owner notification needs no prior WeCom request and no user UUID', async t => {
   const f = fixture(t); assert.equal(f.bridge.receiveSlack(root()), true); await f.bridge.drain();
-  assert.equal(f.posted.length, 0); assert.equal(f.sent[0].target, 'alice'); assert.match(f.sent[0].text, /回复 N1 你的回复/); assert.match(f.sent[0].text, /有效至 1970-01-01 09:01:40，/); assert.equal(f.store.get('SELECT expires FROM requests').expires, 3700000);
+  assert.equal(f.posted.length, 0); assert.equal(f.sent[0].target, 'alice'); assert.match(f.sent[0].text, /您的回复请以“回复 N1”开头，后面跟上您想说的话。\n例如：回复 N1 先放着。/); assert.match(f.sent[0].text, /有效至 1970-01-01 09:01:40，/); assert.equal(f.store.get('SELECT expires FROM requests').expires, 3700000);
   assert.doesNotMatch(f.sent[0].text, /[a-f0-9]{8}-[a-f0-9]{4}-/);
   assert.equal(f.store.get('SELECT root FROM requests').root, '1.1');
   assert.equal(f.bridge.receiveWecom(owner()), true); await f.bridge.drain();
@@ -51,6 +51,7 @@ test('body is opaque generic text, never parses commands or changes destination'
 test('source ts dedup and persistent numeric codes survive restart and parallel notifications', async t => {
   const f = fixture(t); f.bridge.receiveSlack(root('1.1')); await f.bridge.drain(); f.bridge.receiveSlack(root('2.1')); await f.bridge.drain();
   await f.restart(); assert.equal(f.bridge.receiveSlack(root('1.1'), 'different-envelope'), false);
+  assert.match(f.sent[1].text, /您的回复请以“回复 N2”开头[\s\S]*例如：回复 N2 先放着。/); assert.doesNotMatch(f.sent[1].text, /回复 N1/);
   assert.equal(f.bridge.receiveWecom(owner('second', '回复 N2 第二条')), true); await f.bridge.drain();
   assert.equal(f.bridge.receiveWecom(owner('first', '回复 N1 第一条')), true); await f.bridge.drain();
   assert.deepEqual(f.posted.map(p => p.thread_ts), ['2.1', '1.1']);
@@ -63,7 +64,7 @@ test('multi-turn continuation uses the same explicit code and original Slack thr
   f.bridge.receiveWecom(owner()); await f.bridge.drain();
   const reply = root('2.1', { thread_ts: '1.1', text: '[wecom:owner]\n第一段\n\n第二段 &amp; 内容' });
   assert.equal(f.bridge.receiveSlack(reply), true); await f.bridge.drain();
-  assert.match(f.sent.at(-1).text, /^第一段\n\n第二段 & 内容/); assert.match(f.sent.at(-1).text, /回复 N1/); assert.match(f.sent.at(-1).text, /有效至 1970-01-01 09:01:40，/);
+  assert.match(f.sent.at(-1).text, /^第一段\n\n第二段 & 内容/); assert.match(f.sent.at(-1).text, /您的回复请以“回复 N1”开头[\s\S]*例如：回复 N1 先放着。/); assert.match(f.sent.at(-1).text, /有效至 1970-01-01 09:01:40，/);
   assert.equal(f.bridge.receiveWecom(owner('m2', '回复 N1 再回复')), true); await f.bridge.drain();
   assert.deepEqual(f.posted.map(p => p.thread_ts), ['1.1', '1.1']);
   for (const marker of ['review', 'group']) assert.equal(f.bridge.receiveSlack(root('3.1', { thread_ts: '1.1', text: `[wecom:${marker}] x` })), false);
@@ -148,7 +149,7 @@ test('multipart requires every part confirmed; each part preserves explicit repl
   const f = fixture(t); const body = '中😀\n\n'.repeat(1600);
   f.bridge.receiveSlack(root('1.1', { text: '[wecom:notify]'+JSON.stringify({ text: body }) })); await f.bridge.drain();
   assert.ok(f.sent.length > 1); assert.ok(f.sent.every(p => Buffer.byteLength(p.text) <= 3500 && /回复 N1/.test(p.text)));
-  assert.equal(f.sent.map(p => p.text.replace(/^\[\d+\/\d+\] /, '').split('\n\n回复 N1')[0]).join(''), body);
+  assert.equal(f.sent.map(p => p.text.replace(/^\[\d+\/\d+\] /, '').split('\n\n您的回复请以')[0]).join(''), body);
   assert.equal(f.bridge.receiveWecom(owner()), true); await f.bridge.drain();
 });
 test('partially unknown multipart send blocks association and remaining parts across restart', async t => {
