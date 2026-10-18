@@ -3,6 +3,7 @@ import AiBot from '@wecom/aibot-node-sdk';
 import { loadConfig } from './config.js';
 import { Store } from './store.js';
 import { Bridge } from './bridge.js';
+import { ImageRelay } from './images.js';
 
 // SDK logs can include frames, signed URLs, and tokens. Never forward their arguments.
 const log = (event, fields = {}) => console.log(JSON.stringify({ time: new Date().toISOString(), event, ...fields }));
@@ -46,10 +47,11 @@ export async function startBridge({ createApplication } = {}) {
     if (config.replyBot === identity.bot_id || config.replyUser === identity.user_id) { startupStage = 'identity'; throw new Error('Responder must not be bridge identity'); }
     bridge = new Bridge({ config, store, application, own: { bot: identity.bot_id, user: identity.user_id }, log,
       slack: { post: params => app.client.chat.postMessage(params) },
+      images: config.imagesEnabled ? new ImageRelay({ config, client: app.client }) : null,
       wecom: createWecomTransport(wecom) });
     app.event('message', async ({ event, body }) => { if (!stopping) bridge.receiveSlack(event, body.event_id); });
     app.error(async () => log('slack_error'));
-    wecom.on('message.text', frame => {
+    for (const event of ['message.text', 'message.image', 'message.mixed']) wecom.on(event, frame => {
       try { if (!stopping) bridge.receiveWecom(frame); } catch { log('wecom_ingress_error'); }
     });
     wecom.on('authenticated', () => { bridge.wecomReady = true; log('wecom_authenticated'); bridge.drain(); });
