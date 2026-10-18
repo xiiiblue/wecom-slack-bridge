@@ -188,3 +188,19 @@ test('optional narrow member list rejects other authenticated members without me
   assert.equal(f.bridge.receiveWecom(frame('not-listed',{from:{userid:'colleague'}})),false);assert.equal(f.transfers.length,0);
   assert(f.bridge.receiveWecom(frame('listed',{from:{userid:'only-this-member'}})));await f.drain();assert.equal(f.completions.length,1);
 });
+
+test('reviewed exact COS host syntax is supported without suffix-wide download access',()=>{
+  const host='synthetic-aibot-1250000000.cos.ap-guangzhou.myqcloud.com';
+  assert(validDownloadHost(host));
+  for(const bad of ['*.myqcloud.com','*.cos.ap-guangzhou.myqcloud.com','myqcloud.com','evil.myqcloud.com',host+'.evil.test','https://'+host,host+':443',host+'.','127.0.0.1','-bucket-1250000000.cos.ap-guangzhou.myqcloud.com','bucket-1250000000.cos-internal.ap-guangzhou.myqcloud.com','BUCKET-1250000000.cos.ap-guangzhou.myqcloud.com'])assert(!validDownloadHost(bad),bad);
+  const allow=new Set([host]);assert.equal(checkedUrl('https://'+host+'/object?signature=synthetic',allow).hostname,host);
+  for(const other of ['other-bucket-1250000000.cos.ap-guangzhou.myqcloud.com','synthetic-aibot-1250000000.cos.ap-shanghai.myqcloud.com']){
+    assert(validDownloadHost(other));assert.throws(()=>checkedUrl('https://'+other+'/object',allow));
+  }
+});
+
+test('exact COS download uses the same private-DNS and redirect rejection as all media transfers',async()=>{
+  const host='synthetic-aibot-1250000000.cos.ap-guangzhou.myqcloud.com',options={hosts:new Set([host]),maxBytes:16};
+  const privateDns=fakeNetwork({addresses:[{address:'10.0.0.8',family:4}]});await assert.rejects(safeTransfer('https://'+host+'/object',options,privateDns));assert.equal(privateDns.calls.length,0);
+  const redirect=fakeNetwork({status:302,headers:{location:'https://other-bucket-1250000000.cos.ap-guangzhou.myqcloud.com/object'}});await assert.rejects(safeTransfer('https://'+host+'/object',options,redirect));assert.equal(redirect.calls.length,1);
+});

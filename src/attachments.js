@@ -6,7 +6,11 @@ export const IMAGE_CACHE_MS=60000;
 export const IMAGE_MAX_PENDING=2;
 // Exact hosts are a separately reviewed deployment setting, never learned from callbacks.
 export function validDownloadHost(host) {
-  return typeof host==='string' && /^(?:[a-z0-9-]+\.)+(?:qpic\.cn|weixin\.qq\.com)$/.test(host);
+  if(typeof host!=='string' || host.length>253 || !host.split('.').every(label=>label.length<=63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)))return false;
+  const official=/^(?:[a-z0-9-]+\.)+(?:qpic\.cn|weixin\.qq\.com)$/.test(host);
+  const cos=/^[a-z0-9-]+-[1-9][0-9]{4,19}\.cos\.(?:ap|eu|na|sa|me)-[a-z0-9-]+\.myqcloud\.com$/.test(host);
+  // This validates configuration syntax only. Actual media I/O still requires exact Set membership.
+  return official||cos;
 }
 export function imageDescriptors(body, config) {
   const items=body.msgtype==='image'?[{msgtype:'image',image:body.image}]:body.mixed?.msg_item;

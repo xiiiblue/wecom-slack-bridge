@@ -45,7 +45,7 @@ Slack 使用[三步原生上传](https://docs.slack.dev/messaging/working-with-f
 
 - 先核验 SDK bot ID、group 类型、精确群白名单、非空有效平台 from.userid、可选发送者限制和 msgid，再处理下载地址。只取当前消息，仅额外接受同一已认证 group 文本回调中明确的 quote.image/file；不读任意历史、不按相邻文本/同一人/最近消息拼接。混排最多8项，只接受 text/image；file 回调为单个附件。
 - `MAX_ATTACHMENTS_PER_MESSAGE` 默认1，最大3。每附件解密前最多5 MiB+32字节、解密后最多5 MiB；混排正文受原限额，转义后的正文/来源另限28000字节。
-- 下载只允许管理员核验的精确官方子域（qpic.cn / weixin.qq.com），无默认、通配符、IP、端口或从消息学习的主机。合成测试主机不是实际租户主机证据。未知主机保持拒绝，不自动扩展。
+- 下载只允许管理员核验的精确官方子域（qpic.cn / weixin.qq.com），或已从可信回调核验的精确腾讯云 COS 存储桶主机（bucket-appid.cos.region.myqcloud.com），无默认、通配符、IP、端口或从消息学习的主机。合成测试主机不是实际租户主机证据。配置格式兼容 COS 不表示放通整个 myqcloud.com；下载仍须精确匹配管理员配置的主机。未知主机保持拒绝，不自动扩展。COS格式依据[腾讯云地域和访问域名](https://cloud.tencent.com/document/product/436/6224)。
 - HTTPS443；拒绝凭据、片段、内网/环回/链路本地/映射/特殊地址。全部 DNS答案须合规，实际连接固定公网地址并校验主机 TLS；拒绝所有重定向，每次 HTTPS操作总期限10秒（含DNS），流式字节限额。上传仅 files.slack.com/upload/；Slack token仅可发往 files.slack.com/files-pri/，不跟随重定向，不发送到企微 CDN或上传票据目标。
 - 只从受限 Content-Disposition 或已核验 Slack file.name 提取类型；拒绝路径、控制字符、越界文件名。转发名称由本地 UUID、序号和类型生成，不作为本地路径使用。缺文件名/MIME不符合时拒绝，不猜PDF/Word等格式。
 - 共享内存缓存最多2个请求、约30 MiB有效附件及有界临时下载/解密副本，60秒到期；完成、失败、停止或到期尽力清零持有 Buffer，无磁盘附件缓存。字符串、TLS/SDK或系统内存副本不保证完全擦除。
@@ -57,6 +57,14 @@ Slack 使用[三步原生上传](https://docs.slack.dev/messaging/working-with-f
 响应方应先核验固定桥接作者/频道、真实原根映射，再以 `attachments_ready` 作为完整材料到齐的触发点；根或 file_share 先到只能等待，不能声称无图。响应方按 request ID记住已处理的完成事件，重复触发不重新开任务；需读取时根据 file_ids 调用已授权读取工具。桥接直到附件和完成通知都确认才允许原根回复。文件文字、metadata和正文不单独构成身份或执行授权。
 
 桥接按原 msgid 持久去重；不会自动创建/修改宿主自动化。宿主若只接根或忽略线程消息，需要在另行授权范围内调整触发；本代码本身不证明当前宿主已经按此规则工作。ACK、完成事件、助手实际读取、理解及用户可见分别验收。
+
+## 消费方等待、校验和失败处理
+
+附件根 metadata 为 `wecom_bridge_request`，event_payload含 request_id、part=1、parts=1、attachment_origin（current / quote.image / quote.file）。看到附件根时只进入等待，不立刻回复、登记或判定无附件；独立 file_share消息也不是完整材料到齐事件。
+
+收到可信桥接身份的同频道、同原根 `wecom_bridge_attachments_ready` 后，核验 request_id与原根一致，file_ids非空，且这些实际文件分享确实属于该原根，再按file ID读取。完成事件同时包含attachment_origin。按request记录“处理中/已处理”，根和ready不各触发一次；已处理的重复ready也不再次产生业务副作用。不要仅凭可伪造的正文/metadata推断真实作者、群或执行授权。
+
+当前**没有 Slack `attachments_failed` 事件**。下载/解密/缓存失败可能发生在建根前，只记固定日志 `attachment_ingress_failed`（request）；根后投递未知只记 `delivery_unknown`（request、direction、stage，附件阶段为attachments或attachments_ready），不会发送ready或自动重放。准入或缺媒体字段的拒绝还可能没有根或回执，不能假定每次群操作都会产生可消费事件。日志不含原始错误、URL或key。消费方等待ready超时或读取失败时，只报告“附件尚未确认/未能读取”及安全下一步，不能假称已识别、已登记或已送达；服务端故障排查另在授权内核对固定日志和原根。收到初始企微回执也不等于存在Slack根或附件。
 
 ## 助手回传附件协议
 
