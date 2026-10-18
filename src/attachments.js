@@ -25,10 +25,16 @@ export function imageDescriptors(body, config) {
   return {images,text:text.join('\n')};
 }
 export function attachmentDescriptors(body,config) {
-  if(body.msgtype!=='file')return imageDescriptors(body,config);
-  // Reuse URL/key checks without permitting nested or quoted file sources.
+  if(body.msgtype==='text'){
+    const quote=body.quote;
+    if(!quote || !['image','file'].includes(quote.msgtype) || typeof body.text?.content!=='string' || !body.text.content.trim() || Buffer.byteLength(body.text.content)>config.maxBytes)throw new Error('Unsupported quoted media');
+    // Only this authenticated callback's explicit typed quote; never parse text or seek nearby messages.
+    const result=imageDescriptors({msgtype:'image',image:quote[quote.msgtype]},config);
+    return {...result,text:body.text.content,origin:`quote.${quote.msgtype}`,images:result.images.map(x=>({...x,...(quote.msgtype==='file'?{kind:'file'}:{})}))};
+  }
+  if(body.msgtype!=='file')return {...imageDescriptors(body,config),origin:'current'};
   const result=imageDescriptors({msgtype:'image',image:body.file},config);
-  return {...result,images:result.images.map(x=>({...x,kind:'file'}))};
+  return {...result,origin:'current',images:result.images.map(x=>({...x,kind:'file'}))};
 }
 export function attachmentType(buffer,name,mime='application/octet-stream') {
   if(!Buffer.isBuffer(buffer) || buffer.length>IMAGE_MAX_BYTES)throw new Error('Attachment size');

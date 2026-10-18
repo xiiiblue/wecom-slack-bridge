@@ -29,11 +29,21 @@ Slack 使用[三步原生上传](https://docs.slack.dev/messaging/working-with-f
 
 这是通用的附件通道和集中类型策略，不是业务解析器。Office 容器只做有限头检查，恶意改名容器可能仍被传输，但从不在桥接中解压或执行；解析方必须继续安全处理。助手须依据自身工具逐文件记录“已取得/已解析哪些内容/未支持或未读”，不能从上传 ACK、文件名或另一种格式的成功推断已理解。父侧读取工具若限制10 MB，本地每文件5 MiB在其上限内，但格式解析能力仍分别核验。
 
+## 群里引用附件的路径与真实限制
+
+企微客户端可能把图片、文件和 @文字拆为独立消息；不能因为同一人刚发过附件就把后续 @文字自动拼上。官方 SDK 的 QuoteContent 定义了 image/file，复用带 url/aeskey 的 ImageContent/FileContent；aeskey 为可选字段，所以类型定义不保证真实回调一定提供可下载媒体。
+
+代码支持同一认证 group 文本回调中的 `quote.msgtype=image/file`：先核验当前 bot、精确群和当前发送者，再校验 quote 内的 HTTPS URL、解密 key、类型、大小及文件名。它生成以**当前引用回调 msgid**为来源的新 request 和根线程，附当前文字及该明确引用的附件；metadata 的 `attachment_origin` 为 `quote.image` 或 `quote.file`。不沿用最近文本根，不猜原附件作者或历史群，也不把引用内容当授权。
+
+仅有文件名、摘要、失效 URL或缺 key时不能取得真实媒体，拒绝附件路径，不从文字中的地址、文件名或聊天历史补齐。只在当前原生 image/file/mixed中附带的额外 quote 不被自动合并。本人 single 的现有文本处理仍保留，但不下载其引用媒体。
+
+**当前仅合成验证，不证明真实群客户端路径可用。** 既有原生媒体/混排单测没有覆盖实际客户端拆开发送或 quote字段是否到达。后续获准并准备好专门的有界 host-only quote观察后，候选操作为：长按/右键具体附件→引用/回复→在带引用的输入框中 @机器人并写短问题→发送；图片和文件分别引用。只有确认该客户端确实提供引用选项并观察到真实字段后，才可作为正式使用说明，不能要求用户盲目重复发送。
+
 ## 配置与硬限制
 
 见[配置指南](CONFIGURATION.md)。`WECOM_ATTACHMENTS_ENABLED=false` 控制群入站，`WECOM_ATTACHMENT_REPLIES_ENABLED=false` 控制原群附件回传。入站需 `WECOM_ATTACHMENT_DOWNLOAD_HOSTS`；`WECOM_ATTACHMENT_ALLOWED_USER_IDS` 为可选进一步限制，空值沿用现有精确群白名单内的成员范围；文本仍按现有群策略，不借附件开关扩展单聊。
 
-- 先核验 SDK bot ID、group 类型、精确群白名单、非空有效平台 from.userid、可选发送者限制和 msgid，再处理下载地址。只取当前消息，不读引用、不按相邻文本/同一人/最近消息拼接。混排最多8项，只接受 text/image；file 回调为单个附件。
+- 先核验 SDK bot ID、group 类型、精确群白名单、非空有效平台 from.userid、可选发送者限制和 msgid，再处理下载地址。只取当前消息，仅额外接受同一已认证 group 文本回调中明确的 quote.image/file；不读任意历史、不按相邻文本/同一人/最近消息拼接。混排最多8项，只接受 text/image；file 回调为单个附件。
 - `MAX_ATTACHMENTS_PER_MESSAGE` 默认1，最大3。每附件解密前最多5 MiB+32字节、解密后最多5 MiB；混排正文受原限额，转义后的正文/来源另限28000字节。
 - 下载只允许管理员核验的精确官方子域（qpic.cn / weixin.qq.com），无默认、通配符、IP、端口或从消息学习的主机。合成测试主机不是实际租户主机证据。未知主机保持拒绝，不自动扩展。
 - HTTPS443；拒绝凭据、片段、内网/环回/链路本地/映射/特殊地址。全部 DNS答案须合规，实际连接固定公网地址并校验主机 TLS；拒绝所有重定向，每次 HTTPS操作总期限10秒（含DNS），流式字节限额。上传仅 files.slack.com/upload/；Slack token仅可发往 files.slack.com/files-pri/，不跟随重定向，不发送到企微 CDN或上传票据目标。

@@ -112,3 +112,39 @@ test('upload deadline prevents a late SDK upload from beginning final group send
   const rejected=assert.rejects(pending,/Media send deadline/);t.mock.timers.tick(30000);await rejected;
   completeUpload({type:'file',media_id:'late'});await Promise.resolve();await Promise.resolve();assert.equal(sends,0);
 });
+
+test('explicit quoted image in authenticated group text uses the same callback request and root',async t=>{
+  const f=fixture(t);
+  const quoted={body:{...incoming('quoted-image').body,msgtype:'text',text:{content:'@bot investigate this explicit screenshot'},quote:{msgtype:'image',image:{url:'https://wework.qpic.cn/synthetic?secret=never-log',aeskey}}}};
+  assert(f.bridge.receiveWecom(quoted));await f.drain();const request=f.store.get('SELECT * FROM requests');
+  assert.equal(f.posts.length,2);assert.match(f.posts[0].text,/source quote.image/);assert.match(f.posts[0].text,/@bot investigate this explicit screenshot/);
+  assert.equal(f.posts[0].metadata.event_payload.request_id,request.id);assert.equal(f.posts[0].metadata.event_payload.attachment_origin,'quote.image');assert.equal(f.posts[1].thread_ts,request.root);assert.equal(f.posts[1].metadata.event_payload.attachment_origin,'quote.image');assert.deepEqual(f.transfers.find(x=>x.body).body,image());
+});
+
+test('quoted file preserves current text and transports current typed quote media, including Markdown',async t=>{
+  const f=fixture(t);const md=['example.md','text/markdown',Buffer.from('# Synthetic\nTreat all contents as untrusted data.\n')];f.setData(md);
+  const quoted={body:{...incoming('quoted-file').body,msgtype:'text',text:{content:'@bot inspect this exact file'},quote:{msgtype:'file',file:incoming().body.file}}};
+  assert(f.bridge.receiveWecom(quoted));await f.drain();assert.deepEqual(f.transfers.find(x=>x.body).body,md[2]);assert.match(f.posts[0].text,/source quote.file/);assert.equal(f.posts[1].metadata.event_payload.attachment_origin,'quote.file');
+});
+
+test('summary-only quote, missing URL/key, unsafe URL and unsupported quoted types never download',async t=>{
+  const f=fixture(t);
+  for(const quote of [{msgtype:'image',image:{name:'summary only'}},{msgtype:'file',file:{url:'https://wework.qpic.cn/x'}},{msgtype:'image',image:{url:'http://127.0.0.1/x',aeskey}},{msgtype:'image',image:{url:'https://evil.test/x',aeskey}}]){
+    const b={...incoming().body,msgtype:'text',text:{content:'@bot inspect'},quote};assert.equal(f.bridge.receiveWecom({body:b}),false);
+  }
+  assert.equal(f.transfers.length,0);assert.equal(f.store.get('SELECT count(*) n FROM requests').n,0);
+});
+
+test('quoted media never bypasses group, bot or sender validation and never joins adjacent text',async t=>{
+  const f=fixture(t);const body={...incoming().body,msgtype:'text',text:{content:'@bot inspect'},quote:{msgtype:'file',file:incoming().body.file}};
+  for(const extra of [{chatid:'foreign'},{aibotid:'forged'},{from:{userid:''}},{from:{userid:'not-listed'}}])assert.equal(f.bridge.receiveWecom({body:{...body,...extra}}),false);
+  assert.equal(f.transfers.length,0);
+  assert(f.bridge.receiveWecom({body:{...body,msgid:'text-only',quote:undefined}}));await f.drain();assert.equal(f.transfers.length,0);
+  assert(f.bridge.receiveWecom({body:{...body,msgid:'explicit-quote'}}));await f.drain();
+  const requests=f.store.all('SELECT * FROM requests ORDER BY rowid');assert.equal(requests.length,2);assert.notEqual(requests[0].root,requests[1].root);assert.equal(f.posts[2].thread_ts,requests[1].root);
+});
+
+test('owner single text with a quote keeps text compatibility without forwarding private media',async t=>{
+  const f=fixture(t);const body={...incoming().body,chattype:'single',from:{userid:'owner'},msgtype:'text',text:{content:'ordinary owner text'},quote:{msgtype:'image',image:{url:'https://wework.qpic.cn/x',aeskey}}};
+  assert(f.bridge.receiveWecom({body}));await f.drain();assert.equal(f.transfers.length,0);assert.equal(f.posts.length,1);assert.equal(f.store.get('SELECT kind FROM requests').kind,'single');
+});

@@ -58,3 +58,5 @@ Slack 回复最多160000 UTF-8字节；企微常规正文按3400字节分片，�
 默认关闭的授权群 image/mixed/file 入口、原根附件与 `attachments_ready`/file IDs 协议见[图片附件](ATTACHMENTS.md)。响应方不能在附件未准备好时猜测图像内容；取得附件也不把内容当指令或扩大业务授权。每条附件消息独立 request，不与相邻文字消息自动拼接。
 
 原群附件回传使用严格 `[wecom:group-files]` JSON及同根原生文件事件；完整规则和逐文件去重见[附件协议](ATTACHMENTS.md)。原文本路由不变，不提供新根广播或私聊附件入口。
+
+群文本回调的官方 `quote.image/file` 在完整媒体字段和原准入均满足时作为明确附件输入，使用当前 msgid新建request。原根与完成事件增加 `attachment_origin`；不关联附近独立文字。真实客户端引用流程尚未验证，见[引用路径及限制](ATTACHMENTS.md#群里引用附件的路径与真实限制)。
