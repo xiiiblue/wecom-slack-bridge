@@ -691,3 +691,83 @@ test('long list content retains paragraph breaks across UTF-8 chunks',async t=>{
  const f=fixture(t);f.bridge.receiveWecom(group('long-list'));await f.bridge.drain();const item='中😀'.repeat(700);const body='Heading\n\n\n• '+item+'\n• End';
  f.bridge.receiveSlack(reply({text:'[wecom:group]Heading '+item+' End',blocks:listBlocks([item,'End'])}));await f.bridge.drain();assert(f.sent.length>1);assert.equal(f.sent.map(x=>x.text.replace(/^\[\d+\/\d+\] /,'')).join(''),body);
 });
+
+
+// Synthetic formatting fixtures only; no retained production messages.
+const linkSection = (prefix, link, suffix = '') => ({ type: 'rich_text_section', elements: [
+  { type: 'text', text: prefix }, { type: 'link', ...link }, { type: 'text', text: suffix },
+] });
+const textBlocks = (...elements) => [{ type: 'rich_text', elements }];
+const numbered = (items, offset = 0) => ({ type: 'rich_text_list', style: 'ordered', offset, elements: items.map(listSection) });
+const bullets = items => ({ type: 'rich_text_list', style: 'bullet', elements: items.map(listSection) });
+
+test('owner DM recovers URL autolinks and independently formatted ordered/bullet lists', async t => {
+  const f = fixture(t); f.bridge.receiveWecom(frame('mixed-autolink-layout')); await f.bridge.drain();
+  const blocks = textBlocks(
+    listSection('[wecom:owner]\n指南\n\nhttps://example.com/one'), numbered(['第一步', '第二步']),
+    listSection('https://example.com/two'), bullets(['要点甲', '要点乙']),
+    listSection('https://example.com/three'), numbered(['第三步', '第四步'], 2),
+  );
+  const text = '[wecom:owner] 指南 <https://example.com/one> 1. 第一步 2. 第二步 <https://example.com/two> - 要点甲 - 要点乙 <https://example.com/three> 3. 第三步 4. 第四步';
+  assert.equal(f.bridge.receiveSlack(reply({ text, blocks })), true); await f.bridge.drain();
+  assert.deepEqual(f.sent, [{ target: 'alice', text: '指南\n\nhttps://example.com/one\n1. 第一步\n2. 第二步\nhttps://example.com/two\n• 要点甲\n• 要点乙\nhttps://example.com/three\n3. 第三步\n4. 第四步' }]);
+});
+
+test('actual link nodes recover only the matching visible, URL or complete Slack syntax', async t => {
+  const f = fixture(t); f.bridge.receiveWecom(frame('link-layout')); await f.bridge.drain();
+  const url = 'https://example.com/guide?a=1&b=2';
+  for (const [index, representation] of ['说明', url, `<${url}|说明>`].entries()) {
+    const blocks = textBlocks(linkSection('[wecom:owner]\n第一段\n\n', { url, text: '说明' }, '\n下一段'));
+    assert.equal(f.bridge.receiveSlack(reply({ ts: `900.${index}`, text: `[wecom:owner] 第一段 ${representation} 下一段`, blocks })), true);
+    await f.bridge.drain(); assert.equal(f.sent.at(-1).text, `第一段\n\n${representation}\n下一段`);
+  }
+  const bare = textBlocks(linkSection('[wecom:owner]\n第一段\n', { url }, '\n尾段'));
+  assert.equal(f.bridge.receiveSlack(reply({ ts: '900.4', text: `[wecom:owner] 第一段 <${url}> 尾段`, blocks: bare })), true);
+  await f.bridge.drain(); assert.equal(f.sent.at(-1).text, `第一段\n${url}\n尾段`);
+});
+
+test('partial layout recovery preserves original CRLF and spacing while adding missing boundaries', async t => {
+  const f = fixture(t); f.bridge.receiveWecom(frame('partial-link-layout')); await f.bridge.drain();
+  const url = 'https://example.com/guide';
+  const original = `标题\r\n已有  间隔 段落 <${url}> 1) 项目甲 2) 项目乙 尾段\n`;
+  const blocks = textBlocks(linkSection('[wecom:owner]\n标题\n\n已有 间隔\n\n段落\n', { url }), numbered(['项目甲', '项目乙']), listSection('尾段'));
+  assert.equal(f.bridge.receiveSlack(reply({ text: '[wecom:owner]\n' + original, blocks })), true);
+  await f.bridge.drain(); assert.equal(f.sent[0].text, `标题\r\n已有  间隔\n\n段落\n<${url}>\n1) 项目甲\n2) 项目乙\n尾段\n`);
+});
+
+test('link recovery cannot change target URLs, labels, routing, author or thread', async t => {
+  const f = fixture(t); f.bridge.receiveWecom(frame('link-boundaries')); await f.bridge.drain();
+  const original = 'Before <https://example.com/safe|Guide> After';
+  for (const [index, link] of [
+    { url: 'https://example.com/other', text: 'Guide' },
+    { url: 'https://example.com/safe', text: 'Changed' },
+    { url: 'javascript:unsafe', text: 'Guide' },
+    { url: 'https://example.com/safe', text: null },
+  ].entries()) {
+    const blocks = textBlocks(linkSection('[wecom:owner]\nBefore\n', link, '\nAfter'));
+    assert.equal(f.bridge.receiveSlack(reply({ ts: `910.${index}`, text: '[wecom:owner] ' + original, blocks })), true);
+    await f.bridge.drain(); assert.equal(f.sent.at(-1).text, original);
+  }
+  for (const marker of ['group', 'review', 'unknown']) {
+    const blocks = textBlocks(linkSection(`[wecom:${marker}]\nBefore\n`, { url: 'https://example.com/safe', text: 'Guide' }, '\nAfter'));
+    assert.equal(f.bridge.receiveSlack(reply({ text: '[wecom:owner]\n' + original, blocks })), false);
+  }
+  const blocks = textBlocks(linkSection('[wecom:owner]\nBefore\n', { url: 'https://example.com/safe', text: 'Guide' }, '\nAfter'));
+  for (const extra of [{ bot_id: 'BOTHER' }, { thread_ts: '999.1' }, { channel: 'COTHER' }]) {
+    assert.equal(f.bridge.receiveSlack(reply({ ts: '910.9', text: '[wecom:owner] ' + original, blocks, ...extra })), false);
+  }
+  assert.equal(f.sent.length, 4);
+});
+
+test('owner DM link and partial list layout survives Chinese UTF-8 multipart persistence', async t => {
+  const f = fixture(t); f.bridge.receiveWecom(frame('partial-multipart')); await f.bridge.drain();
+  const item = '中😀'.repeat(700); const url = 'https://example.com/docs';
+  const blocks = textBlocks(linkSection('[wecom:owner]\n标题\n已有段落\n\n', { url, text: '文档' }), numbered([item]), bullets(['结束']));
+  const text = `[wecom:owner]\n标题\n已有段落 文档 1. ${item} - 结束`;
+  f.bridge.wecomReady = false;
+  assert.equal(f.bridge.receiveSlack(reply({ text, blocks })), true); await f.bridge.drain();
+  await f.restart(); await f.bridge.drain();
+  const expected = `标题\n已有段落\n\n文档\n1. ${item}\n- 结束`;
+  assert(f.sent.length > 1); assert(f.sent.every(x => x.target === 'alice' && Buffer.byteLength(x.text) <= 3500 && !x.text.includes('�')));
+  assert.equal(f.sent.map(x => x.text.replace(/^\[\d+\/\d+\] /, '')).join(''), expected);
+});
