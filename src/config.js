@@ -16,7 +16,7 @@ export function loadConfig(env = process.env) {
   };
   if (env.WECOM_ATTACHMENT_REPLIES_ENABLED && !['true','false'].includes(env.WECOM_ATTACHMENT_REPLIES_ENABLED)) throw new Error('Invalid WECOM_ATTACHMENT_REPLIES_ENABLED');
   if (env.WECOM_ATTACHMENTS_ENABLED && !['true','false'].includes(env.WECOM_ATTACHMENTS_ENABLED)) throw new Error('Invalid WECOM_ATTACHMENTS_ENABLED');
-  if (config.attachmentsEnabled && (!config.attachmentUsers.size || !config.attachmentHosts.size || [...config.attachmentHosts].some(host => !validDownloadHost(host)))) throw new Error('Images require explicit sender and verified official download host allowlists');
+  if (config.attachmentsEnabled && (!config.attachmentHosts.size || [...config.attachmentHosts].some(host => !validDownloadHost(host)))) throw new Error('Attachments require verified official download host allowlist');
   if (!config.allowedChats.size) throw new Error('WECOM_ALLOWED_CHAT_IDS must not be empty');
   if (config.allowedChats.has(config.ownerUser)) throw new Error('Owner ID must not be a group destination');
   if (Boolean(config.replyBot) === Boolean(config.replyUser)) throw new Error('Set exactly one SLACK_REPLY_BOT_ID or SLACK_REPLY_USER_ID');

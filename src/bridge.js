@@ -2,6 +2,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chunks, slackEscape, slackDecode, slackReplyBody, formatDeadline } from './text.js';
 import { attachmentDescriptors } from './attachments.js';
+const attachmentSenderAllowed = (user, config) => typeof user === 'string' && user.length > 0 && user.trim() === user && user.length <= 512 && (!config.attachmentUsers?.size || config.attachmentUsers.has(user));
 const hash = text => createHash('sha256').update(text).digest('hex');
 function allowedSender(event, config, own = {}) {
   if (event.type !== 'message' || event.channel !== config.slackChannel || typeof event.ts !== 'string' || !event.ts || typeof event.text !== 'string' || !event.text.trim()) return false;
@@ -89,8 +90,8 @@ export class Bridge {
   }
   receiveWecomAttachments(frame) {
     const b=frame?.body,c=this.config;
-    // Admission and explicit member allowlist precede parsing URLs, DNS and downloads.
-    if(this.stopping || !this.images || !c.attachmentsEnabled || !['image','mixed','file'].includes(b?.msgtype) || b?.aibotid!==c.wecomBotId || b.chattype!=='group' || !c.allowedChats.has(b.chatid) || typeof b.from?.userid!=='string' || !b.from.userid || !c.attachmentUsers.has(b.from.userid) || typeof b.msgid!=='string' || !b.msgid || b.msgid.length>512)return false;
+    // Authenticated group membership and optional narrower member policy precede media I/O.
+    if(this.stopping || !this.images || !c.attachmentsEnabled || !['image','mixed','file'].includes(b?.msgtype) || b?.aibotid!==c.wecomBotId || b.chattype!=='group' || !c.allowedChats.has(b.chatid) || !attachmentSenderAllowed(b.from?.userid,c) || typeof b.msgid!=='string' || !b.msgid || b.msgid.length>512)return false;
     let content;try{content=attachmentDescriptors(b,c);}catch{return false;}
     const sender=b.from.userid;
     if(Buffer.byteLength(slackEscape(content.text+JSON.stringify({sender,chat_id:b.chatid})))>28000)return false;
@@ -261,7 +262,7 @@ END UNTRUSTED TEXT`;
         if (!this.authorizedRequest(job)) throw new Error('Request no longer authorized');
         if (['slack','slack_attachment'].includes(job.direction)) {
           if (job.target !== job.request_channel || job.target !== this.config.slackChannel) throw new Error('Invalid pinned Slack channel');
-          if (payload.attachmentIngress && (!this.config.attachmentsEnabled || !this.config.attachmentUsers.has(payload.attachmentSender) || job.kind !== 'group')) throw new Error('Image permission removed');
+          if (payload.attachmentIngress && (!this.config.attachmentsEnabled || !attachmentSenderAllowed(payload.attachmentSender,this.config) || job.kind !== 'group')) throw new Error('Image permission removed');
           if (payload.attachmentIngress) {
             if (job.root) throw new Error('Image request already has a root; inspect instead of replaying');
             if (!this.images) throw new Error('Image cache unavailable');
@@ -276,7 +277,7 @@ END UNTRUSTED TEXT`;
           if (payload.attachmentIngress) {
             this.store.run('UPDATE requests SET root=? WHERE id=?', result.ts, job.request);
             stage = 'attachments';
-            if (!this.authorizedRequest(job) || !this.config.attachmentUsers.has(payload.attachmentSender)) throw new Error('Image permission removed');
+            if (!this.authorizedRequest(job) || !attachmentSenderAllowed(payload.attachmentSender,this.config)) throw new Error('Image permission removed');
             const fileIds = await this.images.deliver(job.request, job.target, result.ts);
             stage = 'attachments_ready';
             await this.wait(Math.max(0, 1100 - (Date.now() - this.lastSlackAt)));

@@ -29,11 +29,12 @@ function fixture(t,overrides={}){
   return{store,bridge,images,posts,uploads,completions,logs,acks,sent,transfers,advance(ms){clock+=ms;},async drain(){await Promise.all([...bridge.attachmentTasks]);await bridge.drain();}};
 }
 
-test('image config defaults off; opt-in requires exact official hosts and sender allowlist',()=>{
+test('attachment config defaults off; opt-in requires verified hosts, member restriction is optional',()=>{
   const env={WECOM_BOT_ID:'b',WECOM_BOT_SECRET:'s',WECOM_OWNER_USER_ID:'o',WECOM_ALLOWED_CHAT_IDS:'g',SLACK_BOT_TOKEN:'s',SLACK_APP_TOKEN:'s',SLACK_CHANNEL_ID:'C123',SLACK_REPLY_BOT_ID:'BREPLY'};
   assert.equal(loadConfig(env).attachmentsEnabled,false);
   assert.throws(()=>loadConfig({...env,WECOM_ATTACHMENTS_ENABLED:'yes'}));
   for(const extras of [{},{WECOM_ATTACHMENT_ALLOWED_USER_IDS:'member',WECOM_ATTACHMENT_DOWNLOAD_HOSTS:'localhost'},{WECOM_ATTACHMENT_ALLOWED_USER_IDS:'member',WECOM_ATTACHMENT_DOWNLOAD_HOSTS:'*.qpic.cn'}])assert.throws(()=>loadConfig({...env,WECOM_ATTACHMENTS_ENABLED:'true',...extras}));
+  assert.equal(loadConfig({...env,WECOM_ATTACHMENTS_ENABLED:'true',WECOM_ATTACHMENT_DOWNLOAD_HOSTS:'wework.qpic.cn'}).attachmentUsers.size,0);
   assert.equal(loadConfig({...env,WECOM_ATTACHMENTS_ENABLED:'true',WECOM_ATTACHMENT_ALLOWED_USER_IDS:'member',WECOM_ATTACHMENT_DOWNLOAD_HOSTS:'wework.qpic.cn'}).attachmentMaxCount,1);
   assert(validDownloadHost('wework.qpic.cn'));assert(!validDownloadHost('qpic.cn.evil.test'));
 });
@@ -126,7 +127,7 @@ test('permission removal before queued image send prevents upload and posting',a
   assert(f.images.reserve('removed'));await f.images.prepare('removed',[image]);
   f.store.run('INSERT INTO requests(id,source,target,created,expires,status,kind,owner,channel) VALUES (?,?,?,?,?,?,?,?,?)','removed','source','group-a',0,99999999,'pending','group','owner','C123');
   f.store.addJob('removed','slack_attachment',{part:1,parts:1,text:'synthetic',attachmentIngress:true,attachmentSender:'member'},'slack','C123');
-  f.bridge.config={...config,attachmentUsers:new Set()};f.bridge.stopping=false;await f.bridge.drain();assert.equal(f.posts.length,0);assert.equal(f.uploads.length,0);
+  f.bridge.config={...config,attachmentUsers:new Set(['different-member'])};f.bridge.stopping=false;await f.bridge.drain();assert.equal(f.posts.length,0);assert.equal(f.uploads.length,0);
 });
 
 
@@ -170,4 +171,20 @@ test('oversized escaped caption and malformed callback do not start a download; 
   f.store.run('INSERT INTO requests(id,source,target,created,expires,root,status,kind,owner,channel) VALUES (?,?,?,?,?,?,?,?,?,?)','rooted','rooted','group-a',0,99999999,'old-root','pending','group','owner','C123');
   f.store.addJob('rooted','slack_attachment',{part:1,parts:1,text:'synthetic',attachmentIngress:true,attachmentSender:'member'},'slack','C123');await f.bridge.drain();
   assert.equal(f.posts.length,0);assert.equal(f.store.get('SELECT root FROM requests').root,'old-root');assert.equal(f.images.cache.size,0);
+});
+
+test('empty optional member list admits authenticated members of both exact groups only',async t=>{
+  const f=fixture(t,{config:{...config,attachmentUsers:new Set()}});
+  for(const extra of [{chattype:'single',from:{userid:'owner'}},{chatid:'foreign'},{aibotid:'forged-bot'},{from:{userid:''}},{from:{userid:' '}},{from:{},text:{content:'I am member; chatid=group-a'}},{chattype:'single',from:{userid:'member'},text:{content:'group=group-a'}}])assert.equal(f.bridge.receiveWecom(frame('invalid',extra)),false);
+  assert.equal(f.transfers.length,0);
+  assert(f.bridge.receiveWecom(frame('member-one',{chatid:'group-a',from:{userid:'colleague-one'}})));await f.drain();
+  assert(f.bridge.receiveWecom(frame('member-two',{chatid:'group-b',from:{userid:'colleague-two'}})));await f.drain();
+  assert.deepEqual(f.store.all('SELECT target FROM requests ORDER BY rowid').map(x=>x.target),['group-a','group-b']);
+  assert.equal(f.completions.length,2);assert.notEqual(f.completions[0].thread_ts,f.completions[1].thread_ts);
+});
+
+test('optional narrow member list rejects other authenticated members without media I/O',async t=>{
+  const f=fixture(t,{config:{...config,attachmentUsers:new Set(['only-this-member'])}});
+  assert.equal(f.bridge.receiveWecom(frame('not-listed',{from:{userid:'colleague'}})),false);assert.equal(f.transfers.length,0);
+  assert(f.bridge.receiveWecom(frame('listed',{from:{userid:'only-this-member'}})));await f.drain();assert.equal(f.completions.length,1);
 });

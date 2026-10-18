@@ -6,7 +6,7 @@
 
 |方向|官方接口与实现路径|所需能力 / 未确认项|
 |---|---|---|
-|企微群→Slack 图片|`message.image` 或 `message.mixed` →受限 HTTPS下载→独立 aeskey 解密→Slack 原生文件上传|已授权群及发送者、核验的精确下载主机；桥接 bot `files:write`；助手另有文件读取/图像输入能力|
+|企微群→Slack 图片|`message.image` 或 `message.mixed` →受限 HTTPS下载→独立 aeskey 解密→Slack 原生文件上传|已认证的授权群成员、核验的精确下载主机；桥接 bot `files:write`；助手另有文件读取/图像输入能力|
 |企微群→Slack 文件|`message.file` →受限下载/解密→原生附件|同上；下载响应须提供可核验的原文件名，否则拒绝，不猜类型|
 |Slack→原企微群 图片/文件|可信作者在原根分享原生附件→`files.info`/受控私有下载→上传临时素材→`sendMediaMessage`|桥接 bot `files:read`；真实响应方上传身份、文件归属与线程 share 可核验；企微租户允许主动媒体推送|
 |被动媒体回复（本实现不用）|`replyMedia` 走 `aibot_respond_msg`，依赖原回调|不能与本实现的 `aibot_send_msg` 主动推送混称；本实现不保存原回调来长期回复|
@@ -31,9 +31,9 @@ Slack 使用[三步原生上传](https://docs.slack.dev/messaging/working-with-f
 
 ## 配置与硬限制
 
-见[配置指南](CONFIGURATION.md)。`WECOM_ATTACHMENTS_ENABLED=false` 控制群入站，`WECOM_ATTACHMENT_REPLIES_ENABLED=false` 控制原群附件回传。入站另需 `WECOM_ATTACHMENT_ALLOWED_USER_IDS` 和 `WECOM_ATTACHMENT_DOWNLOAD_HOSTS`；文本仍按现有群策略，不借附件开关扩展单聊。
+见[配置指南](CONFIGURATION.md)。`WECOM_ATTACHMENTS_ENABLED=false` 控制群入站，`WECOM_ATTACHMENT_REPLIES_ENABLED=false` 控制原群附件回传。入站需 `WECOM_ATTACHMENT_DOWNLOAD_HOSTS`；`WECOM_ATTACHMENT_ALLOWED_USER_IDS` 为可选进一步限制，空值沿用现有精确群白名单内的成员范围；文本仍按现有群策略，不借附件开关扩展单聊。
 
-- 先核验 SDK bot ID、群类型、群/发送者白名单和 msgid，再处理下载地址。只取当前消息，不读引用、不按相邻文本/同一人/最近消息拼接。混排最多8项，只接受 text/image；file 回调为单个附件。
+- 先核验 SDK bot ID、group 类型、精确群白名单、非空有效平台 from.userid、可选发送者限制和 msgid，再处理下载地址。只取当前消息，不读引用、不按相邻文本/同一人/最近消息拼接。混排最多8项，只接受 text/image；file 回调为单个附件。
 - `MAX_ATTACHMENTS_PER_MESSAGE` 默认1，最大3。每附件解密前最多5 MiB+32字节、解密后最多5 MiB；混排正文受原限额，转义后的正文/来源另限28000字节。
 - 下载只允许管理员核验的精确官方子域（qpic.cn / weixin.qq.com），无默认、通配符、IP、端口或从消息学习的主机。合成测试主机不是实际租户主机证据。未知主机保持拒绝，不自动扩展。
 - HTTPS443；拒绝凭据、片段、内网/环回/链路本地/映射/特殊地址。全部 DNS答案须合规，实际连接固定公网地址并校验主机 TLS；拒绝所有重定向，每次 HTTPS操作总期限10秒（含DNS），流式字节限额。上传仅 files.slack.com/upload/；Slack token仅可发往 files.slack.com/files-pri/，不跟随重定向，不发送到企微 CDN或上传票据目标。
@@ -69,4 +69,4 @@ SQLite仅保存关联、来源去重、文字/来源摘要、附件标记、回�
 
 重启后入站缺缓存任务转 unknown，sending也变unknown；不重新下载或假装文字成功。尚未开始的回传任务仅保留file IDs，可在原授权/TTL内重新核验后读取，任何已开始的未知发送不自动重放。独立 `slack_attachment` / `wecom_attachment` 方向及 `slack` / `group_attachment` lane使已审查的旧文本基线拒绝附件任务；任意其他回退版本须另验。当前数据库无 schema变更。
 
-上线前统一确认双向范围、scope/重新授权、发送者与精确主机、真实Ditto上传及助手读取/解析能力；本轮不部署、不重启、不改运行配置、群/凭据/权限或自动化，不发真实测试。另获准后按[维护说明](../deploy/README.md)停唯一写者、一致备份、固定提交安装，以合成附件逐格式验证真实双向送达。回退保留当前数据库与新增记录，关闭入口、停唯一实例后退已验版本，核对未完成任务及远端副作用，不用旧库覆盖新状态、不重放unknown。文档和模拟测试通过不代表附件已上线或助手已能识别。
+上线前统一确认双向范围、scope/重新授权、既有群成员范围/可选限制与精确主机、真实Ditto上传及助手读取/解析能力；本轮不部署、不重启、不改运行配置、群/凭据/权限或自动化，不发真实测试。另获准后按[维护说明](../deploy/README.md)停唯一写者、一致备份、固定提交安装，以合成附件逐格式验证真实双向送达。回退保留当前数据库与新增记录，关闭入口、停唯一实例后退已验版本，核对未完成任务及远端副作用，不用旧库覆盖新状态、不重放unknown。文档和模拟测试通过不代表附件已上线或助手已能识别。
