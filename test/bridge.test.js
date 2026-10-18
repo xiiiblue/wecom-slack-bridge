@@ -660,3 +660,34 @@ test('preserving original newlines does not bypass conflicting rich text route r
   }
   assert.equal(f.sent.length,0); assert.equal(f.store.get("SELECT count(*) n FROM jobs WHERE direction='wecom'").n,0);
 });
+
+const listSection = text => ({ type:'rich_text_section',elements:[{type:'text',text}] });
+const listBlocks = (items, extra = {}, prefix = '[wecom:group]\nHeading\n\n') => [{type:'rich_text',elements:[listSection(prefix),{type:'rich_text_list',style:'bullet',elements:items.map(listSection),...extra}]}];
+test('observed section/list shape restores paragraphs and list boundaries from flattened Slack text', async t => {
+  const f=fixture(t);f.bridge.receiveWecom(group('list-shape'));await f.bridge.drain();
+  const blocks=[{type:'rich_text',elements:[...richText(['[wecom:group]','\n','验收示例','\n','第一行','\n第二行\n'],['第二段\n','列表：'])[0].elements,{type:'rich_text_list',style:'bullet',elements:richText(['项目','甲'],['项目乙'])[0].elements}]}];
+  const expected='验收示例\n第一行\n第二行\n\n第二段\n列表：\n• 项目甲\n• 项目乙';
+  for(const [i,text] of ['验收示例 第一行 第二行 第二段 列表： • 项目甲 • 项目乙','验收示例 第一行 第二行 第二段 列表： - 项目甲 - 项目乙','验收示例 第一行 第二行 第二段 列表： 项目甲 项目乙'].entries()){
+    assert.equal(f.bridge.receiveSlack(reply({ts:`800.${i}`,text:'[wecom:group] '+text,blocks})),true);await f.bridge.drain();assert.equal(f.sent.at(-1).text,expected);
+  }
+});
+test('ordered list offsets and indentation restore layout without changing words',async t=>{
+ const f=fixture(t);f.bridge.receiveWecom(group('ordered-layout'));await f.bridge.drain();
+ f.bridge.receiveSlack(reply({text:'[wecom:group]Heading 5. First 6. Second',blocks:listBlocks(['First','Second'],{style:'ordered',offset:4,indent:1})}));await f.bridge.drain();assert.equal(f.sent[0].text,'Heading\n\n\n  5. First\n  6. Second');
+});
+test('unsupported or invalid list structures and changed list content retain original text',async t=>{
+ const f=fixture(t);f.bridge.receiveWecom(group('list-fallback'));await f.bridge.drain();
+ const invalid=[listBlocks(['Changed']),listBlocks(['First'],{style:'unknown'}),listBlocks(['First'],{indent:9}),listBlocks(['First'],{offset:-1}),listBlocks(['First'],{elements:[{type:'rich_text_list',elements:[]}]}),listBlocks(['First'],{elements:[{type:'rich_text_section',elements:[{type:'link',url:'https://example.com/'}]}]})];
+ for(const [i,blocks]of invalid.entries()){f.bridge.receiveSlack(reply({ts:`810.${i}`,text:'[wecom:group]Heading First',blocks}));await f.bridge.drain();assert.equal(f.sent.at(-1).text,'Heading First');}
+});
+test('list support preserves original multiline text and still rejects conflicting routes',async t=>{
+ const f=fixture(t);f.bridge.receiveWecom(group('list-routing'));await f.bridge.drain();
+ const body='Heading\n\n• First\n• Second';
+ f.bridge.receiveSlack(reply({text:'[wecom:group]\n'+body,blocks:listBlocks(['First','Second'])}));await f.bridge.drain();assert.equal(f.sent[0].text,body);
+ assert.equal(f.bridge.receiveSlack(reply({ts:'820.2',text:'[wecom:owner]\n'+body,blocks:listBlocks(['First','Second'])})),false);assert.equal(f.sent.length,1);
+ assert.equal(f.bridge.receiveSlack(reply({ts:'820.3',bot_id:'BOTHER',text:'[wecom:group]Heading First',blocks:listBlocks(['First'])})),false);
+});
+test('long list content retains paragraph breaks across UTF-8 chunks',async t=>{
+ const f=fixture(t);f.bridge.receiveWecom(group('long-list'));await f.bridge.drain();const item='中😀'.repeat(700);const body='Heading\n\n\n• '+item+'\n• End';
+ f.bridge.receiveSlack(reply({text:'[wecom:group]Heading '+item+' End',blocks:listBlocks([item,'End'])}));await f.bridge.drain();assert(f.sent.length>1);assert.equal(f.sent.map(x=>x.text.replace(/^\[\d+\/\d+\] /,'')).join(''),body);
+});

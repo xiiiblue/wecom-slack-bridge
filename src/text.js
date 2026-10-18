@@ -22,30 +22,53 @@ export function slackReplyBody(event, route) {
   if (!Array.isArray(event.blocks) || !event.blocks.length) return fallback;
   const sections = [];
   let bytes = 0;
+  const readSection = section => {
+    if (section?.type !== 'rich_text_section' || !Array.isArray(section.elements)) return null;
+    if (++bytes > 160000) return null;
+    const inline = [];
+    for (const node of section.elements) {
+      if (node?.type !== 'text' || typeof node.text !== 'string') return null;
+      bytes += Buffer.byteLength(node.text) + 1;
+      if (bytes > 160000) return null;
+      inline.push(node.text);
+    }
+    return inline.join('');
+  };
   for (const block of event.blocks) {
     if (block?.type !== 'rich_text' || !Array.isArray(block.elements) || !block.elements.length) return fallback;
     for (const section of block.elements) {
-      if (section?.type !== 'rich_text_section' || !Array.isArray(section.elements)) return fallback;
-      const inline = [];
-      for (const node of section.elements) {
-        if (node?.type !== 'text' || typeof node.text !== 'string') return fallback;
-        bytes += Buffer.byteLength(node.text);
-        if (bytes > 160000) return fallback;
-        inline.push(node.text);
-      }
-      bytes += 1;
-      if (bytes > 160000) return fallback;
-      sections.push(inline.join(''));
+      if (section?.type === 'rich_text_section') {
+        const text = readSection(section);
+        if (text === null) return fallback;
+        sections.push([text, text, text, text]);
+      } else if (section?.type === 'rich_text_list') {
+        const { style, elements, indent = 0, offset = 0 } = section;
+        if (!['bullet', 'ordered'].includes(style) || !Array.isArray(elements) || !elements.length || elements.length > 1000 ||
+            !Number.isSafeInteger(indent) || indent < 0 || indent > 8 || !Number.isSafeInteger(offset) || offset < 0 || offset > 1000000) return fallback;
+        const items = elements.map(readSection);
+        if (items.some(item => item === null || !item.trim())) return fallback;
+        // Compare only structural list-marker variants; never strip arbitrary body text.
+        sections.push([0, 1, 2, 3].map(variant => items.map((item, i) => {
+          const prefixes = style === 'bullet' ? ['• ', '- ', '* ', ''] : [`${offset + i + 1}. `, `${offset + i + 1}) `, `${offset + i + 1}. `, ''];
+          return '  '.repeat(indent) + prefixes[variant] + item;
+        }).join('\n')));
+      } else return fallback;
     }
   }
-  const rendered = sections.join('\n');
+  const layouts = [0, 1, 2, 3].map(variant => sections.map(section => section[variant]).join('\n'));
+  const rendered = layouts[0];
+  if (Buffer.byteLength(rendered) > 160000) return fallback;
   const marker = /^\[wecom:([^\]]+)\]/.exec(rendered);
   if (marker && marker[1] !== route[1]) return null;
   const candidate = /^\[wecom:(owner|review|group)\]\s*([\s\S]+)$/.exec(rendered);
   if (!candidate) return fallback;
   const body = slackDecode(candidate[2]);
   const normalized = text => text.replace(/\s+/g, ' ').trim();
-  if (normalized(body) !== normalized(fallback)) return fallback;
+  const equivalent = layouts.some(layout => {
+    const variant = /^\[wecom:(owner|review|group)\]\s*([\s\S]+)$/.exec(layout);
+    return variant?.[1] === route[1] && normalized(slackDecode(variant[2])) === normalized(fallback);
+  });
+  if (!equivalent) return fallback;
   // Preserve existing layout; blocks may only enrich a body with no line breaks.
   return /[\r\n]/.test(fallback) || !/[\r\n]/.test(body) ? fallback : body;
 }
