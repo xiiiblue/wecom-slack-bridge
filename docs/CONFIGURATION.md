@@ -59,3 +59,7 @@ npm run config:check
 ## 长期来源反馈
 
 `FEEDBACK_ALLOWED_REPOSITORIES` 默认为空（关闭），启用时为已批准的小写仓库名白名单，须同时有固定 `SLACK_REPLY_BOT_ID` 和已核验的 `FEEDBACK_REPLY_USER_ID`（真实 U/W user ID），事件两者都必须匹配；这只是进一步收窄现有响应方身份，不新增凭据。它增加长期私有路由保留，须在部署范围中明确确认；不新增凭据或权限。完整协议见 [长期来源反馈](SOURCE_FEEDBACK.md)。
+
+## Optional direct receipt HTTP ingress
+
+Default off with no listener. The separate [HTTP receipt contract](HTTP_RECEIPTS.md) defines explicit bind/peer/repository settings, required network-trust acknowledgement, strict submission/status schemas, persistence and unknown outcomes. Enabling adds a new inbound network capability and requires its own reviewed scope; no credentials are generated. A source IP is not Codex/user identity.

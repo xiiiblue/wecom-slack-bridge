@@ -94,3 +94,7 @@ sudo systemctl stop wecom-slack-bridge.service
 获准现场验收后，用专门合成来源验证真实桥接 App/频道、原群 route、原根 bind ACK、跨 TTL 与重启后查询、单条 result ACK、重复 deliveryId 不重发、撤销及移除白名单不发送。真实群测试须另有明确范围，不用真实建单替代模拟测试。未验收前不可宣布可用；平台拒绝或窗口未知如实报告。
 
 回退先停写并保留升级后的完整数据库与队列证据，清空功能白名单，回到记录的旧代码/依赖；旧版本忽略新表与 feedback 类型，不会把它当普通群回复。不要恢复旧数据库覆盖上线后新数据或把 unknown 改 pending。若需数据库恢复，先逐项核对新产生请求及外部发送，按单独恢复方案保护新增数据，禁止盲重放。
+
+## Optional direct receipt ingress (not enabled by this change)
+
+The default deployment still opens no inbound HTTP port. [Direct receipts](../docs/HTTP_RECEIPTS.md) require a separately approved exact bind/port, peer and repository allowlists and network-trust acknowledgement. Do not add firewall/proxy rules, tokens or persistent access automatically. Preserve current private state before rollout, stop the single writer for rollback, retain new delivery evidence and never replay unknown. A successful loopback/mock test is not production connectivity or audience acceptance; do not route a previously rejected send through this entry point.

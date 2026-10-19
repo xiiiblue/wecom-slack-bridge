@@ -72,3 +72,5 @@ npm start
 项目已有 [MIT License](LICENSE)，本轮不改变许可条款。`private: true` 防止意外发布到 npm，不影响源码仓库的使用；当前主要以 Git 固定提交部署。
 
 可选跨天原群结果回传见 [长期来源反馈](docs/SOURCE_FEEDBACK.md)，默认关闭。
+
+Optional [direct receipt HTTP transport](docs/HTTP_RECEIPTS.md) is disabled by default. It only submits results and queries their status for existing active source bindings; explicit reviewed network admission is required before enabling. It does not authenticate a developer application or verify business completion.

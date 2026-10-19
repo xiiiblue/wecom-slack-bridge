@@ -49,3 +49,7 @@ status 与 binding-status 是显式按需查询，不安装轮询。命令按真
 `feedback_bindings`、`feedback_deliveries`、`feedback_commands` 和 kind=feedback 的内部请求/队列存在现有私有 SQLite 状态中，普通请求 TTL、prune 和附件清理不变。长期请求没有普通可回复根映射；仅上述受控命令使用保存的原根。来源和固定路由保留至管理员按既有保留策略处理，撤销不擦除。发送正文 ACK 后沿用现有队列擦除，另保留正文 SHA-256 用于去重；不归档群历史。数据、WAL、备份及摘要均视为私有，不提交任何仓库。
 
 单事务绑定及结果入队；sending 恢复为 unknown。数据库已有单写者锁、频控及不盲重试策略继续适用。通知不延长普通 request TTL。升级与备份回退见 [部署维护](../deploy/README.md)；本地模拟测试不代表群主动发送或长期平台窗口已验收。
+
+## Optional direct receipt transport
+
+The [HTTP receipt contract](HTTP_RECEIPTS.md) adds a separately configured, default-off submission/status ingress for existing active bindings. It shares the same deliveryId/outbox and policy, never creates or retargets a binding, and never fabricates Slack identity. Network admission is a new trust boundary, not inherited Slack authentication; code availability does not enable or authorize it.

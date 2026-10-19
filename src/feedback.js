@@ -2,6 +2,23 @@ import { randomUUID, createHash } from 'node:crypto';
 import { slackDecode } from './text.js';
 const digest = text => createHash('sha256').update(text).digest('hex');
 const referenceAllowed = (c, b) => c.feedbackRepositories?.has(b.repository) && !!c.replyBot && b.bot === c.replyBot && !!c.feedbackUser && b.responder_user === c.feedbackUser && b.wecom_bot === c.wecomBotId;
+// Shared admission for trusted transports; never creates or retargets a binding.
+export function feedbackBinding(bridge, repository, issue) {
+  const b = bridge.store.get('SELECT b.*,r.target,r.owner,r.channel,r.kind,r.status FROM feedback_bindings b JOIN requests r ON r.id=b.request WHERE b.repository=? AND b.issue=?', repository, issue);
+  const c = bridge.config;
+  return b && b.kind === 'feedback' && b.status === 'sent' && b.owner === c.ownerUser && b.channel === c.slackChannel && referenceAllowed(c,b) && c.allowedChats.has(b.target) ? b : null;
+}
+export function feedbackDelivery(store, deliveryId) {
+  return store.get('SELECT d.*,j.status FROM feedback_deliveries d JOIN jobs j ON j.id=d.job WHERE delivery_id=?',deliveryId);
+}
+// Caller holds the same store transaction as its binding check.
+export function putFeedbackDelivery(store, binding, deliveryId, text) {
+  const fingerprint = digest(text), prior = feedbackDelivery(store, deliveryId);
+  if (prior) return prior.request === binding.request && prior.digest === fingerprint;
+  const result = store.run('INSERT INTO jobs(request,direction,payload,lane,target) VALUES (?,?,?,?,?)',binding.request,'wecom',JSON.stringify({part:1,parts:1,text}),'group',binding.target);
+  store.run('INSERT INTO feedback_deliveries VALUES (?,?,?,?)',deliveryId,binding.request,fingerprint,Number(result.lastInsertRowid));
+  return true;
+}
 export function authorizeFeedback(bridge, request) {
   const b = bridge.store.get('SELECT * FROM feedback_bindings WHERE request=?', request.request ?? request.id);
   return !!b && (b.active || (request.direction === 'slack' && (request.lane === 'feedback_receipt' || request.lane?.startsWith('feedback_query:')))) && referenceAllowed(bridge.config, b) && bridge.config.allowedChats.has(request.original_target ?? request.target);
@@ -52,16 +69,15 @@ export function receiveFeedback(bridge, event) {
       receipt(`source_revoked | ${p.repository}#${p.issue}`);
       return true;
     }
-    const d = store.get('SELECT d.*,j.status FROM feedback_deliveries d JOIN jobs j ON j.id=d.job WHERE delivery_id=?',p.deliveryId);
+    const d = feedbackDelivery(store,p.deliveryId);
     if (action === 'status') {
       if (d && d.request !== b.request) return false;
       receipt(`source_delivery | ${p.deliveryId} | ${d?.status === 'sent' ? 'wecom_ack' : d?.status || 'not_found'} | binding_active=${b.active} | ACK does not prove audience read`); return true;
     }
-    const text = slackDecode(p.text), fingerprint = digest(text);
-    if (d) return d.request === b.request && d.digest === fingerprint;
+    const text = slackDecode(p.text);
+    if (d) return putFeedbackDelivery(store,b,p.deliveryId,text);
     // One bounded plain-text message avoids partial multipart delivery. Unknown stays blocked across restart.
-    const result = store.run('INSERT INTO jobs(request,direction,payload,lane,target) VALUES (?,?,?,?,?)',b.request,'wecom',JSON.stringify({part:1,parts:1,text}),'group',b.target);
-    store.run('INSERT INTO feedback_deliveries VALUES (?,?,?,?)',p.deliveryId,b.request,fingerprint,Number(result.lastInsertRowid));
+    putFeedbackDelivery(store,b,p.deliveryId,text);
     receipt(`source_delivery | ${p.deliveryId} | accepted | queued locally; not a WeCom ACK`);
     return true;
   }
