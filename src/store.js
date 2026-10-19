@@ -23,12 +23,20 @@ export class Store {
         this.run("UPDATE requests SET status='quarantined'");
         this.run("UPDATE jobs SET status='quarantined' WHERE status!='sent'");
       }
+      if (!this.all('PRAGMA table_info(requests)').some(x => x.name === 'ingress_bot')) this.db.exec('ALTER TABLE requests ADD COLUMN ingress_bot TEXT');
       if (!this.all('PRAGMA table_info(jobs)').some(x => x.name === 'expires')) this.db.exec('ALTER TABLE jobs ADD COLUMN expires INTEGER');
       this.db.exec(`CREATE TABLE IF NOT EXISTS reviews (id TEXT PRIMARY KEY, request TEXT NOT NULL, expires INTEGER NOT NULL, status TEXT NOT NULL)`);
     });
     this.db.exec(`CREATE TABLE IF NOT EXISTS owner_conversations (
       code INTEGER PRIMARY KEY AUTOINCREMENT, request TEXT NOT NULL UNIQUE,
       bot TEXT NOT NULL, last_delivery INTEGER NOT NULL DEFAULT 0)`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS feedback_bindings (
+      request TEXT PRIMARY KEY, repository TEXT NOT NULL, issue INTEGER NOT NULL,
+      source TEXT NOT NULL, root TEXT NOT NULL, bot TEXT NOT NULL, responder_user TEXT NOT NULL, wecom_bot TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1, UNIQUE(repository,issue));
+      CREATE TABLE IF NOT EXISTS feedback_deliveries (
+      delivery_id TEXT PRIMARY KEY, request TEXT NOT NULL, digest TEXT NOT NULL, job INTEGER NOT NULL UNIQUE);`);
+    this.db.exec('CREATE TABLE IF NOT EXISTS feedback_commands (source TEXT PRIMARY KEY, digest TEXT NOT NULL)');
     this.db.exec("UPDATE jobs SET status='unknown' WHERE status='sending'");
   }
   transaction(fn) { this.db.exec('BEGIN IMMEDIATE'); try { const value = fn(); this.db.exec('COMMIT'); return value; } catch (e) { this.db.exec('ROLLBACK'); throw e; } }

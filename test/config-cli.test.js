@@ -20,3 +20,14 @@ test('offline config command fails closed with redacted invalid-field output', (
   assert.equal(JSON.parse(run.stderr).event, 'config_invalid');
   for (const secret of ['synthetic-secret', 'synthetic-token', 'synthetic-app']) assert.ok(!run.stderr.includes(secret));
 });
+test('feedback defaults off and requires canonical repository and fixed responder user with bot', () => {
+  for (const [settings, status] of [
+    [{ FEEDBACK_ALLOWED_REPOSITORIES: 'example/project' }, 78],
+    [{ FEEDBACK_ALLOWED_REPOSITORIES: 'example/project', FEEDBACK_REPLY_USER_ID: 'UDOT' }, 0],
+    [{ FEEDBACK_ALLOWED_REPOSITORIES: 'https://example.com', FEEDBACK_REPLY_USER_ID: 'UDOT' }, 78],
+    [{ FEEDBACK_ALLOWED_REPOSITORIES: 'example/project', FEEDBACK_REPLY_USER_ID: 'bad' }, 78],
+  ]) {
+    const run = spawnSync(process.execPath, ['scripts/check-config.js'], { env: { ...env, ...settings }, encoding: 'utf8', timeout: 5000 });
+    assert.equal(run.status, status);
+  }
+});
