@@ -101,7 +101,7 @@ test('concurrent submissions enqueue once; transaction rollback leaves no partia
   assert.equal((await f.call({...payload,deliveryId:'rollback'})).code,503);f.store.run=run;
   assert.equal(f.store.get('SELECT count(*) n FROM jobs WHERE direction=?','wecom').n,1);
 });
-test('incomplete request has a bounded deadline and shutdown closes idle sockets',async t=>{
+test('complete headers with incomplete body hit the request deadline',async t=>{
   const f=await fixture(t);const socket=connect(f.server.address().port,'127.0.0.1');
   await new Promise(resolve=>socket.once('connect',resolve));
   socket.write(`POST /v1/receipts HTTP/1.1\r\nHost: 127.0.0.1:${f.server.address().port}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{`);
@@ -117,4 +117,40 @@ test('literal HTTP text shares decoded Slack identity; disabled ingress and busy
   f.config.receiptHttp.port=f.server.address().port;
   await assert.rejects(()=>startReceiptHttp(f.bridge),{code:'EADDRINUSE'});
   f.config.receiptHttp.port=0;
+});
+
+async function within(promise,ms,label) {
+  let timer;
+  try { return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(label)),ms);})]); }
+  finally { clearTimeout(timer); }
+}
+async function clientSocket(t,port) {
+  const socket=connect(port,'127.0.0.1');
+  t.after(()=>socket.destroy());
+  await within(new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.once('error',reject);}),2000,'connect deadline');
+  socket.on('error',()=>{});socket.resume();return socket;
+}
+test('explicit server close terminates idle and incomplete connections and releases the listener',async t=>{
+  const f=await fixture(t),port=f.server.address().port;
+  const idle=await clientSocket(t,port),body=await clientSocket(t,port),header=await clientSocket(t,port);
+  body.write(`POST /v1/receipts HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{`);
+  header.write('POST /v1/receipts HTTP/1.1\r\nHost: ');
+  const closed=[idle,body,header].map(socket=>new Promise(resolve=>socket.once('close',resolve)));
+  assert.ok([idle,body,header].every(socket=>!socket.destroyed));
+  await within(Promise.all([f.server.close(),...closed]),2000,'active close deadline');
+  assert.equal(f.server.address(),null);
+  assert.ok([idle,body,header].every(socket=>socket.destroyed));
+  const probe=connect(port,'127.0.0.1');t.after(()=>probe.destroy());
+  await within(new Promise((resolve,reject)=>{probe.once('connect',()=>reject(Error('listener remains open')));probe.once('error',e=>e.code==='ECONNREFUSED'?resolve():reject(e));}),2000,'listener probe deadline');
+  assert.equal(f.store.get('SELECT count(*) n FROM feedback_deliveries').n,0);
+});
+test('slow incomplete headers expire despite ongoing bytes that prevent idle timeout',async t=>{
+  const f=await fixture(t),socket=await clientSocket(t,f.server.address().port);let writes=0;
+  socket.write(`POST /v1/receipts HTTP/1.1\r\nHost: 127.0.0.1:${f.server.address().port}\r\nX-Slow: `);
+  const trickle=setInterval(()=>{if(!socket.destroyed){writes++;socket.write('x');}},150);
+  t.after(()=>clearInterval(trickle));
+  try { await within(new Promise(resolve=>socket.once('close',resolve)),8000,'header deadline exceeded'); }
+  finally { clearInterval(trickle); }
+  assert.ok(writes>=5,'connection must survive initial header admission');
+  assert.equal(f.store.get('SELECT count(*) n FROM feedback_deliveries').n,0);
 });

@@ -43,7 +43,8 @@ export async function startReceiptHttp(bridge) {
   const c = bridge.config.receiptHttp;
   if (!c?.enabled) return null; // No socket, credentials, state or timer when disabled.
   const reply = (res,code,body) => { if (!res.destroyed && !res.writableEnded) res.writeHead(code,{'Content-Type':'application/json','Cache-Control':'no-store','Connection':'close','X-Content-Type-Options':'nosniff'}).end(JSON.stringify(body)); };
-  const server = createServer((req,res) => {
+  // Node's default 30s timeout sweep would delay the 5s deadline for trickling headers.
+  const server = createServer({ connectionsCheckingInterval:1000 },(req,res) => {
     const peer = req.socket.remoteAddress?.replace(/^::ffff:/,'');
     const port = server.address()?.port, host = c.host.includes(':') ? `[${c.host}]:${port}` : `${c.host}:${port}`;
     if (bridge.stopping || !c.enabled || !c.clients.has(peer) || req.headers.host !== host || ['origin','transfer-encoding','content-encoding'].some(key=>Object.hasOwn(req.headers,key))) { reply(res,403,{error:'unavailable'}); req.resume(); return; }
