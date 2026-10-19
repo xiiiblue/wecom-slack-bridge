@@ -1,6 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chunks, slackEscape, slackDecode, slackReplyBody, formatDeadline } from './text.js';
+import { receiveFeedback, authorizeFeedback } from './feedback.js';
 import { attachmentDescriptors } from './attachments.js';
 const attachmentSenderAllowed = (user, config) => typeof user === 'string' && user.length > 0 && user.trim() === user && user.length <= 512 && (!config.attachmentUsers?.size || config.attachmentUsers.has(user));
 const hash = text => createHash('sha256').update(text).digest('hex');
@@ -27,6 +28,7 @@ export class Bridge {
       const conversation = this.store.get('SELECT bot FROM owner_conversations WHERE request=?', request.request ?? request.id);
       return !!this.config.replyBot && conversation?.bot === this.config.replyBot && (request.original_target ?? request.target) === this.config.ownerUser;
     }
+    if (request.kind === 'feedback') return authorizeFeedback(this, request);
     if (request.kind === 'single') return true;
     if (request.kind === 'group') return this.config.allowedChats.has(request.original_target ?? request.target);
     try { return this.application?.authorizeRequest?.(this, request) === true; } catch { return false; }
@@ -79,6 +81,7 @@ export class Bridge {
         this.store.addJob(id, 'slack', { part: 1, parts: 1, review: review.id, text: `Owner review response | request ${id} | review ${review.id}\nTransport only: interpret the owner's words; no approval or execution is performed by this bridge.\n${envelope(match[2])}` }, 'slack', c.slackChannel);
       } else {
         this.store.run('INSERT INTO requests(id,source,target,created,expires,root,status,kind,owner,channel) VALUES (?,?,?,?,?,NULL,?,?,?,?)', id, source, target, now, now + c.ttlMs, 'pending', kind, c.ownerUser, c.slackChannel);
+        this.store.run('UPDATE requests SET ingress_bot=? WHERE id=?', c.wecomBotId, id);
         this.store.addJob(id, 'slack', { part: 1, parts: 1, text: `WeCom external text | request ${id}\nReply in this root thread with exact leading marker [wecom:owner] for a plain private reply, [wecom:review] to request owner review of a group request, or [wecom:group] to reply to the original group, followed by the reply body. Owner-only requests prohibit review and group routing.\n${envelope(text)}` }, 'slack', c.slackChannel);
       }
       return true;
@@ -102,7 +105,7 @@ export class Bridge {
     try{
       this.store.transaction(()=>{
         this.store.run('INSERT INTO seen VALUES (?,?)',source,now);
-        this.store.run('INSERT INTO requests(id,source,target,created,expires,root,status,kind,owner,channel) VALUES (?,?,?,?,?,NULL,?,?,?,?)',id,source,b.chatid,now,now+c.ttlMs,'pending','group',c.ownerUser,c.slackChannel);
+        this.store.run('INSERT INTO requests(id,source,target,created,expires,root,status,kind,owner,channel,ingress_bot) VALUES (?,?,?,?,?,NULL,?,?,?,?,?)',id,source,b.chatid,now,now+c.ttlMs,'pending','group',c.ownerUser,c.slackChannel,c.wecomBotId);
       });
     }catch{this.images.release(id);throw new Error('Image admission failed');}
     Promise.resolve().then(()=>this.wecom.ack(frame,id)).catch(()=>this.log('wecom_ack_failed',{request:id}));
@@ -130,6 +133,10 @@ END UNTRUSTED TEXT`;
   }
   receiveSlack(event, eventId) {
     if (this.stopping) return false;
+    if (/^\[wecom:source-(bind|result|status|revoke)\]/.test(event?.text || '')) {
+      if (!allowedReply(event, this.config, this.own) || event.bot_id !== this.config.replyBot) return false;
+      return receiveFeedback(this, event);
+    }
     if (event?.text?.startsWith('[wecom:group-files]')) return this.receiveSlackAttachments(event);
     if ((!event.thread_ts || event.thread_ts === event.ts) && allowedSender(event, this.config, this.own)) {
       if (event.text.startsWith('[wecom:notify]')) return this.receiveNotification(event);
@@ -231,8 +238,8 @@ END UNTRUSTED TEXT`;
   }
   async pump() {
     while (!this.stopping) {
-      const job = this.store.get(`SELECT j.*,r.root,r.kind,r.owner,r.channel AS request_channel,r.target AS original_target,COALESCE(j.expires,r.expires) AS delivery_expires FROM jobs j JOIN requests r ON r.id=j.request
-        WHERE j.status='pending' AND (j.direction IN ('slack','slack_attachment') OR ?=1) AND (r.kind IN ('single','group','notify') OR ?=1)
+      const job = this.store.get(`SELECT j.*,COALESCE(b.root,r.root) AS root,r.kind,r.owner,r.channel AS request_channel,r.target AS original_target,COALESCE(j.expires,r.expires) AS delivery_expires FROM jobs j JOIN requests r ON r.id=j.request LEFT JOIN feedback_bindings b ON b.request=r.id
+        WHERE j.status='pending' AND (j.direction IN ('slack','slack_attachment') OR ?=1) AND (r.kind IN ('single','group','notify','feedback') OR ?=1)
         AND r.status!='quarantined' AND NOT EXISTS (SELECT 1 FROM jobs earlier WHERE earlier.request=j.request AND earlier.lane=j.lane AND earlier.id<j.id AND earlier.status!='sent') ORDER BY j.id LIMIT 1`, this.wecomReady ? 1 : 0, this.application ? 1 : 0);
       if (!job) return;
       if (job.delivery_expires < this.now()) { this.store.run("UPDATE jobs SET status='expired' WHERE id=? AND status='pending'", job.id); continue; }
@@ -312,7 +319,7 @@ END UNTRUSTED TEXT`;
           this.store.run("UPDATE jobs SET status='sent',payload='{}' WHERE id=?",job.id);
         } else {
           // Revalidate pinned destinations after restart/config changes; never retarget.
-          if (!(job.lane === 'owner' && job.target === job.owner && job.target === this.config.ownerUser) && !(job.lane === 'group' && job.kind === 'group' && job.target === job.original_target && this.config.allowedChats.has(job.target))) throw new Error('Invalid pinned target');
+          if (!(job.lane === 'owner' && job.target === job.owner && job.target === this.config.ownerUser) && !(job.lane === 'group' && ['group','feedback'].includes(job.kind) && job.target === job.original_target && this.config.allowedChats.has(job.target))) throw new Error('Invalid pinned target');
           stage = 'transport';
           const result = await this.wecom.send(job.target, payload.text);
           stage = 'acknowledgment';
