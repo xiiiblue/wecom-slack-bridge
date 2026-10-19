@@ -6,14 +6,14 @@ import { join } from 'node:path';
 import { Bridge } from '../src/bridge.js';
 import { Store } from '../src/store.js';
 function fixture(t, fail=false) {
-  const dir=mkdtempSync(join(tmpdir(),'feedback-')); let now=1000, store=new Store(dir), bridge;
+  const dir=mkdtempSync(join(tmpdir(),'feedback-')); let now=1000, sequence=0, store=new Store(dir), bridge;
   const sent=[],posted=[],c={wecomBotId:'robot',ownerUser:'owner',slackChannel:'C123',replyBot:'BDOT',feedbackUser:'UDOT',allowedChats:new Set(['group']),feedbackRepositories:new Set(['example/project']),ttlMs:10000,maxBytes:32000};
   const deps={config:c,now:()=>now,wait:async()=>{},slack:{post:async p=>{posted.push(p);return {ok:true,ts:`1.${posted.length}`};}},wecom:{ack:async()=>{},send:async(target,text)=>{sent.push({target,text});if(fail)throw Error('private');return {errcode:0};}}};
   const start=()=>{bridge=new Bridge({...deps,store});bridge.wecomReady=true;};start();
   t.after(async()=>{await bridge.stop();store.close();rmSync(dir,{recursive:true,force:true});});
   return {get bridge(){return bridge;},get store(){return store;},c,sent,posted,
     async ingress(){bridge.receiveWecom({body:{aibotid:'robot',msgtype:'text',msgid:'m1',chattype:'group',chatid:'group',from:{userid:'sender'},text:{content:'question'}}});await bridge.drain();},
-    command(action,p={},extra={}){return bridge.receiveSlack({type:'message',channel:'C123',bot_id:'BDOT',user:'UDOT',ts:`2.${posted.length}`,thread_ts:'1.1',text:`[wecom:source-${action}]`+JSON.stringify({repository:'example/project',issue:1,...p}),...extra});},
+    command(action,p={},extra={}){return bridge.receiveSlack({type:'message',channel:'C123',bot_id:'BDOT',user:'UDOT',ts:`2.${++sequence}`,thread_ts:'1.1',text:`[wecom:source-${action}]`+JSON.stringify({repository:'example/project',issue:1,...p}),...extra});},
     async drain(){await bridge.drain();},async restart(){await bridge.stop();store.close();store=new Store(dir);start();},expire(ms=20000){now+=ms;store.prune(now);}};
 }
 test('cross-day prune and restart preserve pinned audience, dedup and queryable ACK',async t=>{
@@ -59,4 +59,51 @@ test('delivery IDs cannot cross bindings, revocation preserves past ACK evidence
   assert.equal(f.command('bind',{issue:2}),true);await f.drain();assert.equal(f.command('result',{issue:2,deliveryId:'D1',text:'one'}),false);
   assert.equal(f.command('revoke'),true);await f.drain();assert.equal(f.command('status',{deliveryId:'D1'}),true);await f.drain();assert.match(f.posted.at(-1).text,/wecom_ack.*binding_active=0/);
   assert.equal(f.command('bind'),false);assert.equal(f.command('result',{deliveryId:'D2',text:'two'}),false);
+});
+test('status redelivery dedups real message identity across concurrency, prune and restart',async t=>{
+  const f=fixture(t);await f.ingress();f.command('bind');await f.drain();
+  const status={deliveryId:'D1'}, identity={ts:'55.1'};
+  const results=await Promise.all(Array.from({length:8},async()=>f.command('status',status,identity)));
+  assert.ok(results.every(Boolean));await f.drain();assert.equal(f.posted.filter(p=>p.text.startsWith('source_delivery | D1')).length,1);
+  f.expire(8*86400000);await f.restart();assert.equal(f.command('status',status,identity),true);await f.drain();assert.equal(f.posted.filter(p=>p.text.startsWith('source_delivery | D1')).length,1);
+  assert.equal(f.command('status',{deliveryId:'changed'},identity),false);
+  assert.equal(f.command('status',status,{ts:'55.2'}),true);await f.drain();assert.equal(f.posted.filter(p=>p.text.startsWith('source_delivery | D1')).length,2);
+});
+test('lost source_bound Slack ACK can be inspected without rebinding or replaying unknown receipt',async t=>{
+  for(const invalidAck of [false,true]){
+    const f=fixture(t);await f.ingress();const post=f.bridge.slack.post;let boundAttempts=0;
+    f.bridge.slack.post=async p=>{if(p.text.startsWith('source_bound')){boundAttempts++;if(invalidAck)return {ok:false};throw Error('uncertain Slack send');}return post(p);};
+    assert.equal(f.command('bind'),true);await f.drain();assert.equal(f.store.get("SELECT status FROM jobs WHERE lane='feedback_receipt'").status,'unknown');
+    f.expire();await f.restart();assert.equal(f.command('bind'),true);await f.drain();assert.equal(boundAttempts,1);
+    assert.equal(f.command('binding-status',{}, {ts:'66.1'}),true);await f.drain();assert.match(f.posted.at(-1).text,/^source_binding \| example\/project#1 \| bound \| binding_active=1$/);
+    assert.equal(f.command('binding-status',{}, {ts:'66.1'}),true);await f.drain();assert.equal(f.posted.filter(p=>p.text.startsWith('source_binding')).length,1);
+    assert.equal(f.command('binding-status',{}, {thread_ts:'other'}),false);assert.equal(boundAttempts,1);
+  }
+});
+test('external WeCom ACK followed by local sent persistence failure stays unknown without replay',async t=>{
+  const f=fixture(t);await f.ingress();f.command('bind');await f.drain();const run=f.store.run.bind(f.store);let failed=false;
+  f.store.run=(sql,...args)=>{if(!failed && sql==="UPDATE jobs SET status='sent',payload='{}' WHERE id=?" && f.store.get('SELECT direction FROM jobs WHERE id=?',args[0])?.direction==='wecom'){failed=true;throw Error('disk failure after ACK');}return run(sql,...args);};
+  f.command('result',{deliveryId:'D1',text:'one'});await f.drain();assert.equal(f.sent.length,1);assert.equal(f.store.get("SELECT status FROM jobs WHERE direction='wecom'").status,'unknown');
+  await f.restart();f.command('result',{deliveryId:'D1',text:'one'});f.command('result',{deliveryId:'D2',text:'two'});await f.drain();assert.equal(f.sent.length,1);
+  f.command('status',{deliveryId:'D1'});await f.drain();assert.match(f.posted.at(-1).text,/\| unknown \|/);
+});
+test('revocation during transport pacing cancels pending result before network send',async t=>{
+  const f=fixture(t);await f.ingress();f.command('bind');await f.drain();
+  let release,entered;const waiting=new Promise(resolve=>{entered=resolve;}), gate=new Promise(resolve=>{release=resolve;});let waits=0;
+  f.bridge.wait=async()=>{if(++waits===1){entered();await gate;}};
+  f.command('result',{deliveryId:'D1',text:'one'});await waiting;
+  assert.equal(f.command('revoke'),true);release();await f.drain();assert.equal(f.sent.length,0);
+  assert.equal(f.store.get("SELECT status FROM jobs WHERE direction='wecom'").status,'revoked');
+  await f.restart();await f.drain();assert.equal(f.sent.length,0);
+});
+test('concurrent duplicate results with distinct message IDs enqueue and send once',async t=>{
+  const f=fixture(t);await f.ingress();f.command('bind');await f.drain();
+  const results=await Promise.all(Array.from({length:10},async()=>f.command('result',{deliveryId:'D1',text:'one'})));
+  assert.ok(results.every(Boolean));await f.drain();assert.equal(f.sent.length,1);assert.equal(f.store.get('SELECT count(*) n FROM feedback_deliveries').n,1);
+  await f.restart();f.command('result',{deliveryId:'D1',text:'one'});await f.drain();assert.equal(f.sent.length,1);
+});
+test('binding status never creates or changes binding and remains available after revoke',async t=>{
+  const f=fixture(t);await f.ingress();assert.equal(f.command('binding-status'),false);assert.equal(f.store.get('SELECT count(*) n FROM feedback_bindings').n,0);
+  f.command('bind');await f.drain();const before=f.store.get('SELECT * FROM feedback_bindings');f.command('binding-status');await f.drain();assert.deepEqual(f.store.get('SELECT * FROM feedback_bindings'),before);
+  f.command('revoke');await f.drain();f.command('binding-status');await f.drain();assert.match(f.posted.at(-1).text,/binding_active=0$/);
 });

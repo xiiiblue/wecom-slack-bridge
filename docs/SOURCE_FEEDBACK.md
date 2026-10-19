@@ -10,7 +10,15 @@
 [wecom:source-bind]{"repository":"example/project","issue":42}
 ```
 
-严格 JSON 仅接受所列字段。repository 必须精确命中白名单，issue 为正安全整数。桥接用数据库中认证入站记录固定原群、原根、本人、频道、可信 bot 与 user、入站机器人及来源摘要。一个仓库/Issue 仅能绑定一个来源，重复同根绑定幂等，不允许覆盖、跨根改投、以群名/chat_id/正文 URL 创建路由。绑定成功在原根返回 `source_bound`；入站接收回执不代表绑定成功。升级前缺少可信 ingress_bot 的旧记录不可绑定；过期、被清理或无法核验的历史来源须报告缺失，另行可核验恢复，不猜建。新来源只能显式绑定新事项，不能冒充旧来源。
+严格 JSON 仅接受所列字段。repository 必须精确命中白名单，issue 为正安全整数。桥接用数据库中认证入站记录固定原群、原根、本人、频道、可信 bot 与 user、入站机器人及来源摘要。一个仓库/Issue 仅能绑定一个来源，重复同根绑定幂等，不允许覆盖、跨根改投、以群名/chat_id/正文 URL 创建路由。绑定成功在原根返回 `source_bound`；首次 ACK 未知时不要靠重发 bind 获取确认，在同根发只读绑定状态查询：
+
+```text
+[wecom:source-binding-status]{"repository":"example/project","issue":42}
+```
+
+已存在且身份/原根一致的绑定返回 `source_binding | example/project#42 | bound | binding_active=1`（撤销为0）。此查询不创建、恢复或更改绑定；无匹配、配置撤销或无法认证时不返回成功。它走独立的查询回执 lane，不被先前 unknown 的 source_bound ACK 阻挡。无 ACK 不能推断未绑定；先保留未知并核验，禁止补造来源。
+
+入站接收回执不代表绑定成功。升级前缺少可信 ingress_bot 的旧记录不可绑定；过期、被清理或无法核验的历史来源须报告缺失，另行可核验恢复，不猜建。新来源只能显式绑定新事项，不能冒充旧来源。
 
 完成后，可信响应方自行核验交付和可公开正文，在同一原根发送：
 
@@ -32,12 +40,12 @@
 |revoked|绑定已撤销或队列撤销|
 |not_found|此绑定没有该 ID 的记录，不能推断之前外部操作未发生|
 
-status 是显式按需查询，不安装轮询。Slack 状态回执本身也可能 unknown；此时停止重复发送，管理员只读核对私有数据库及两端事实。原根不可访问时报告阻碍，不新建广播根。unknown 阻挡该绑定后续 group lane；其他绑定及 Slack receipt lane 独立。不同事项、跨进程、网络不具备全局恰好一次保证。
+status 与 binding-status 是显式按需查询，不安装轮询。命令按真实 Slack 消息的固定 channel+ts 摘要及原 event.text 摘要在 `feedback_commands` 持久去重，不受七天 seen 清理影响；同事件重投不再创建回执，内容冲突拒绝。新的显式查询使用新的真实 Slack 消息身份，仅读取现存绑定/交付状态，独立回执 lane 允许在旧查询 ACK 未知时重新取证，不重放旧 ACK 或企微通知。查询快照对应本次接收时刻，不把迟到回执当最新状态。Slack 状态回执本身也可能 unknown；此时不盲重放，可新发一次明确查询或由管理员只读核对私有数据库及两端事实。原根不可访问时报告阻碍，不新建广播根。unknown 阻挡该绑定后续 group lane；其他绑定及 Slack receipt lane 独立。不同事项、跨进程、网络不具备全局恰好一次保证。
 
 撤销使用原根 `[wecom:source-revoke]{"repository":"example/project","issue":42}`，取消该绑定 pending 任务并保留记录；不撤回已经开始的发送，不能重绑定或恢复。撤销后仍可查状态。配置、群白名单、仓库白名单或机器人身份变更均在出站前重新核验，不自动迁移已有数据。不能借 owner/review/notify 或旧执行协议恢复。
 
 ## 数据与恢复
 
-`feedback_bindings`、`feedback_deliveries` 和 kind=feedback 的内部请求/队列存在现有私有 SQLite 状态中，普通请求 TTL、prune 和附件清理不变。长期请求没有普通可回复根映射；仅上述受控命令使用保存的原根。来源和固定路由保留至管理员按既有保留策略处理，撤销不擦除。发送正文 ACK 后沿用现有队列擦除，另保留正文 SHA-256 用于去重；不归档群历史。数据、WAL、备份及摘要均视为私有，不提交任何仓库。
+`feedback_bindings`、`feedback_deliveries`、`feedback_commands` 和 kind=feedback 的内部请求/队列存在现有私有 SQLite 状态中，普通请求 TTL、prune 和附件清理不变。长期请求没有普通可回复根映射；仅上述受控命令使用保存的原根。来源和固定路由保留至管理员按既有保留策略处理，撤销不擦除。发送正文 ACK 后沿用现有队列擦除，另保留正文 SHA-256 用于去重；不归档群历史。数据、WAL、备份及摘要均视为私有，不提交任何仓库。
 
 单事务绑定及结果入队；sending 恢复为 unknown。数据库已有单写者锁、频控及不盲重试策略继续适用。通知不延长普通 request TTL。升级与备份回退见 [部署维护](../deploy/README.md)；本地模拟测试不代表群主动发送或长期平台窗口已验收。

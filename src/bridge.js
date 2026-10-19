@@ -133,7 +133,7 @@ END UNTRUSTED TEXT`;
   }
   receiveSlack(event, eventId) {
     if (this.stopping) return false;
-    if (/^\[wecom:source-(bind|result|status|revoke)\]/.test(event?.text || '')) {
+    if (/^\[wecom:source-(bind|binding-status|result|status|revoke)\]/.test(event?.text || '')) {
       if (!allowedReply(event, this.config, this.own) || event.bot_id !== this.config.replyBot) return false;
       return receiveFeedback(this, event);
     }
@@ -260,7 +260,7 @@ END UNTRUSTED TEXT`;
         this.lastWecomAt = performance.now();
       }
       // Persist intent BEFORE network I/O. A crash or uncertain result must never cause blind replay.
-      this.store.run("UPDATE jobs SET status='sending' WHERE id=?", job.id);
+      if (!this.store.run("UPDATE jobs SET status='sending' WHERE id=? AND status='pending'", job.id).changes) continue;
       let stage = 'payload', attachmentCacheId;
       try {
         const payload = JSON.parse(job.payload);
