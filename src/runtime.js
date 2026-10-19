@@ -4,6 +4,7 @@ import { loadConfig } from './config.js';
 import { Store } from './store.js';
 import { Bridge } from './bridge.js';
 import { AttachmentRelay } from './attachments.js';
+import { startReceiptHttp } from './receipt-http.js';
 
 // SDK logs can include frames, signed URLs, and tokens. Never forward their arguments.
 const log = (event, fields = {}) => console.log(JSON.stringify({ time: new Date().toISOString(), event, ...fields }));
@@ -30,7 +31,7 @@ export function createWecomTransport(client) {
   };
 }
 export async function startBridge({ createApplication } = {}) {
-  let store, app, wecom, bridge, health, stopping = false;
+  let store, app, wecom, bridge, health, receipts, stopping = false;
   let startupStage = 'config';
   async function shutdown(code = 0) {
     if (stopping) return;
@@ -38,6 +39,7 @@ export async function startBridge({ createApplication } = {}) {
     const deadline = setTimeout(() => process.exit(code || 1), 15000);
     try {
       // Keep connections alive briefly to finish the one in-flight send.
+      await receipts?.close();
       await bridge?.stop();
       wecom?.disconnect();
       await app?.stop();
@@ -85,6 +87,9 @@ export async function startBridge({ createApplication } = {}) {
     process.on('SIGINT', () => void shutdown());
     await app.start();
     if (!stopping) wecom.connect();
+    startupStage = 'receipt_http';
+    if (!stopping) receipts = await startReceiptHttp(bridge);
+    if (stopping) { await receipts?.close(); return { config, store, bridge, shutdown }; }
     health = setInterval(() => { store.prune(Date.now()); log('health', { wecomConnected: wecom.isConnected, queue: store.counts() }); bridge.drain(); }, 30000);
     log('bridge_started'); bridge.drain();
     return { config, store, bridge, shutdown };

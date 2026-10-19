@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { validDownloadHost } from './attachments.js';
+import { receiptHttpConfig } from './receipt-http.js';
 export function loadConfig(env = process.env) {
   const required = key => { const value = env[key]?.trim(); if (!value) throw new Error(`Missing ${key}`); return value; };
   const list = key => new Set((env[key] || '').split(',').map(x => x.trim()).filter(Boolean));
@@ -22,6 +23,7 @@ export function loadConfig(env = process.env) {
   if (config.feedbackRepositories.size && !/^[UW][A-Z0-9]+$/.test(config.feedbackUser || '')) throw new Error('Feedback requires FEEDBACK_REPLY_USER_ID');
   if (config.feedbackRepositories.size && !config.replyBot) throw new Error('Feedback requires fixed reply bot');
   if (!config.allowedChats.size) throw new Error('WECOM_ALLOWED_CHAT_IDS must not be empty');
+  config.receiptHttp = receiptHttpConfig(env, config.feedbackRepositories);
   if (config.allowedChats.has(config.ownerUser)) throw new Error('Owner ID must not be a group destination');
   if (Boolean(config.replyBot) === Boolean(config.replyUser)) throw new Error('Set exactly one SLACK_REPLY_BOT_ID or SLACK_REPLY_USER_ID');
   if (!/^[CG][A-Z0-9]+$/.test(config.slackChannel)) throw new Error('SLACK_CHANNEL_ID must be a channel ID');
