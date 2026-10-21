@@ -2,6 +2,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chunks, slackEscape, slackDecode, slackReplyBody, formatDeadline } from './text.js';
 import { receiveFeedback, authorizeFeedback } from './feedback.js';
+import { authorizeAnnouncement } from './announcements.js';
 import { attachmentDescriptors } from './attachments.js';
 const attachmentSenderAllowed = (user, config) => typeof user === 'string' && user.length > 0 && user.trim() === user && user.length <= 512 && (!config.attachmentUsers?.size || config.attachmentUsers.has(user));
 const hash = text => createHash('sha256').update(text).digest('hex');
@@ -29,6 +30,7 @@ export class Bridge {
       return !!this.config.replyBot && conversation?.bot === this.config.replyBot && (request.original_target ?? request.target) === this.config.ownerUser;
     }
     if (request.kind === 'feedback') return authorizeFeedback(this, request);
+    if (request.kind === 'announcement') return authorizeAnnouncement(this, request);
     if (request.kind === 'single') return true;
     if (request.kind === 'group') return this.config.allowedChats.has(request.original_target ?? request.target);
     try { return this.application?.authorizeRequest?.(this, request) === true; } catch { return false; }
@@ -239,7 +241,7 @@ END UNTRUSTED TEXT`;
   async pump() {
     while (!this.stopping) {
       const job = this.store.get(`SELECT j.*,COALESCE(b.root,r.root) AS root,r.kind,r.owner,r.channel AS request_channel,r.target AS original_target,COALESCE(j.expires,r.expires) AS delivery_expires FROM jobs j JOIN requests r ON r.id=j.request LEFT JOIN feedback_bindings b ON b.request=r.id
-        WHERE j.status='pending' AND (j.direction IN ('slack','slack_attachment') OR ?=1) AND (r.kind IN ('single','group','notify','feedback') OR ?=1)
+        WHERE j.status='pending' AND (j.direction IN ('slack','slack_attachment') OR ?=1) AND (r.kind IN ('single','group','notify','feedback','announcement') OR ?=1)
         AND r.status!='quarantined' AND NOT EXISTS (SELECT 1 FROM jobs earlier WHERE earlier.request=j.request AND earlier.lane=j.lane AND earlier.id<j.id AND earlier.status!='sent') ORDER BY j.id LIMIT 1`, this.wecomReady ? 1 : 0, this.application ? 1 : 0);
       if (!job) return;
       if (job.delivery_expires < this.now()) { this.store.run("UPDATE jobs SET status='expired' WHERE id=? AND status='pending'", job.id); continue; }
@@ -319,7 +321,7 @@ END UNTRUSTED TEXT`;
           this.store.run("UPDATE jobs SET status='sent',payload='{}' WHERE id=?",job.id);
         } else {
           // Revalidate pinned destinations after restart/config changes; never retarget.
-          if (!(job.lane === 'owner' && job.target === job.owner && job.target === this.config.ownerUser) && !(job.lane === 'group' && ['group','feedback'].includes(job.kind) && job.target === job.original_target && this.config.allowedChats.has(job.target))) throw new Error('Invalid pinned target');
+          if (!(job.lane === 'owner' && job.target === job.owner && job.target === this.config.ownerUser) && !(job.lane === 'group' && ['group','feedback','announcement'].includes(job.kind) && job.target === job.original_target && this.config.allowedChats.has(job.target))) throw new Error('Invalid pinned target');
           stage = 'transport';
           const result = await this.wecom.send(job.target, payload.text);
           stage = 'acknowledgment';

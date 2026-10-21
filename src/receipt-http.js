@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { isIP } from 'node:net';
 import { TextDecoder } from 'node:util';
 import { feedbackBinding, feedbackDelivery, putFeedbackDelivery } from './feedback.js';
+import { announcementBinding } from './announcements.js';
 
 const localAddress = value => {
   if (value === '::1') return true;
@@ -9,13 +10,20 @@ const localAddress = value => {
   const [a,b] = value.split('.').map(Number);
   return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
 };
-export function receiptHttpConfig(env, feedbackRepositories) {
+export function receiptHttpConfig(env, feedbackRepositories, allowedChats = new Set()) {
   if (env.RECEIPT_HTTP_ENABLED && !['true','false'].includes(env.RECEIPT_HTTP_ENABLED)) throw Error('Invalid receipt HTTP configuration');
   if (env.RECEIPT_HTTP_ENABLED !== 'true') return { enabled:false };
   const list = key => new Set((env[key] || '').split(',').map(s=>s.trim()).filter(Boolean));
   const c = { enabled:true, host:env.RECEIPT_HTTP_HOST?.trim(), port:Number(env.RECEIPT_HTTP_PORT), clients:list('RECEIPT_HTTP_CLIENT_IPS'), repositories:list('RECEIPT_HTTP_REPOSITORIES') };
   // Network trust is explicit, not an assertion of application/process identity.
   if (env.RECEIPT_HTTP_TRUST_NETWORK !== 'true' || !localAddress(c.host) || !Number.isInteger(c.port) || c.port < 1 || c.port > 65535 || !c.clients.size || [...c.clients].some(ip=>!localAddress(ip)) || !c.repositories.size || [...c.repositories].some(repo=>!feedbackRepositories.has(repo))) throw Error('Invalid receipt HTTP configuration');
+  c.announcementTargets = new Map();
+  const targets = JSON.parse(env.RECEIPT_HTTP_ANNOUNCEMENT_TARGETS || '[]');
+  if (!Array.isArray(targets) || targets.length > 16) throw Error('Invalid announcement configuration');
+  for (const target of targets) {
+    if (!target || Object.keys(target).length !== 3 || !c.repositories.has(target.repository) || typeof target.name !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(target.name) || !allowedChats.has(target.chatId) || c.announcementTargets.has(`${target.repository}:${target.name}`)) throw Error('Invalid announcement configuration');
+    c.announcementTargets.set(`${target.repository}:${target.name}`, target.chatId);
+  }
   return c;
 }
 
@@ -33,9 +41,9 @@ export function parseReceiptJson(text) {
   }
   return parsed;
 }
-const valid = (p, submit) => {
-  const fields = submit ? ['repository','issue','deliveryId','text'] : ['repository','issue','deliveryId'];
-  return Object.keys(p).length === fields.length && fields.every(k=>Object.hasOwn(p,k)) && typeof p.repository === 'string' && Number.isSafeInteger(p.issue) && p.issue > 0 && typeof p.deliveryId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(p.deliveryId) && (!submit || (typeof p.text === 'string' && !!p.text.trim() && Buffer.byteLength(p.text) <= 3000));
+const valid = (p, submit, announcement) => {
+  const fields = ['repository', announcement ? 'name' : 'issue', 'deliveryId', ...(submit ? ['text'] : [])];
+  return Object.keys(p).length === fields.length && fields.every(k=>Object.hasOwn(p,k)) && typeof p.repository === 'string' && (announcement ? typeof p.name === 'string' && /^[a-z][a-z0-9-]{0,63}$/.test(p.name) : Number.isSafeInteger(p.issue) && p.issue > 0) && typeof p.deliveryId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(p.deliveryId) && (!submit || (typeof p.text === 'string' && !!p.text.trim() && Buffer.byteLength(p.text) <= 3000));
 };
 const view = d => ({ status:d ? (d.status === 'sent' ? 'wecom_ack' : d.status) : 'not_found' });
 
@@ -48,8 +56,9 @@ export async function startReceiptHttp(bridge) {
     const peer = req.socket.remoteAddress?.replace(/^::ffff:/,'');
     const port = server.address()?.port, host = c.host.includes(':') ? `[${c.host}]:${port}` : `${c.host}:${port}`;
     if (bridge.stopping || !c.enabled || !c.clients.has(peer) || req.headers.host !== host || ['origin','transfer-encoding','content-encoding'].some(key=>Object.hasOwn(req.headers,key))) { reply(res,403,{error:'unavailable'}); req.resume(); return; }
-    const submit = req.url === '/v1/receipts';
-    if (req.method !== 'POST' || (!submit && req.url !== '/v1/receipts/status')) { reply(res,404,{error:'not_found'}); req.resume(); return; }
+    const announcement = ['/v1/announcements','/v1/announcements/status'].includes(req.url);
+    const submit = ['/v1/receipts','/v1/announcements'].includes(req.url);
+    if (req.method !== 'POST' || (!submit && !['/v1/receipts/status','/v1/announcements/status'].includes(req.url))) { reply(res,404,{error:'not_found'}); req.resume(); return; }
     if (req.headers['content-type'] !== 'application/json') { reply(res,415,{error:'invalid_request'}); req.resume(); return; }
     const length = Number(req.headers['content-length']);
     if (!Number.isSafeInteger(length) || length < 2 || length > 16384) { reply(res,413,{error:'invalid_request'}); req.resume(); return; }
@@ -61,15 +70,16 @@ export async function startReceiptHttp(bridge) {
     req.on('end',()=>{
       cleanup(); if(complete)return; complete=true;
       let p;
-      try { p=parseReceiptJson(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks))); if(!valid(p,submit))throw Error(); }
+      try { p=parseReceiptJson(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks))); if(!valid(p,submit,announcement))throw Error(); }
       catch { reply(res,400,{error:'invalid_request'});return; }
       try {
         const result=bridge.store.transaction(()=>{
           if(bridge.stopping || !c.enabled || !c.repositories.has(p.repository))return null;
-          const b=feedbackBinding(bridge,p.repository,p.issue);
-          if(!b?.active)return null;
+          let b=announcement ? announcementBinding(bridge,p.repository,p.name) : feedbackBinding(bridge,p.repository,p.issue);
+          if(!b || (!announcement && !b.active))return null;
           const d=feedbackDelivery(bridge.store,p.deliveryId);
           if(d && d.request!==b.request)return {code:409,body:{error:'conflict'}};
+          if(submit && announcement && !b.request)b=announcementBinding(bridge,p.repository,p.name,true);
           if(submit && !putFeedbackDelivery(bridge.store,b,p.deliveryId,p.text))return {code:409,body:{error:'conflict'}};
           return {code:submit?202:200,body:submit?{status:'accepted',delivery:view(feedbackDelivery(bridge.store,p.deliveryId)).status}:view(d)};
         });

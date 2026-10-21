@@ -1,6 +1,6 @@
 # Optional direct receipt HTTP transport
 
-**Default off; code availability is not deployment or permission to enable it.** This adds only submission and status lookup for an existing durable source binding. It does not create bindings, choose recipients, authenticate business completion, or execute commands. Existing Slack intake, ordinary TTLs and attachments are unchanged.
+**Default off; code availability is not deployment or permission to enable it.** Issue receipts submit and query existing durable source bindings. Separately configured named announcements use pinned local audiences without an Issue binding. Neither accepts recipient IDs, authenticates business completion, or executes commands. Existing Slack intake, ordinary TTLs and attachments are unchanged.
 
 ## Trust and activation boundary
 
@@ -53,6 +53,20 @@ Only these fields are accepted. There is no target/chat/user/root/bind/revoke/co
 
 A revoked/invalid binding cannot be queried through this endpoint; 403 does not erase its prior delivery evidence. Status lookup is read-only and creates no Slack/WeCom jobs. Responses expose no routing identity, private logs or credentials; requests/bodies are not logged. HTTP accepted state is distinct from Slack accepted/ACK, which this path does not produce.
 
+## Optional named announcements
+
+`RECEIPT_HTTP_ANNOUNCEMENT_TARGETS` defaults to `[]`. An explicitly approved local array may contain up to 16 entries, each with exactly `repository,name,chatId`. Repositories must already be admitted by receipt HTTP; chat IDs must already be in the group allowlist. Names match `[a-z][a-z0-9-]{0,63}` and are unique within a repository. Synthetic configuration:
+
+```json
+[{"repository":"example/project","name":"dev-deploy","chatId":"synthetic-approved-group"}]
+```
+
+This enables `POST /v1/announcements` with exactly `repository,name,deliveryId,text`, and `POST /v1/announcements/status` with exactly `repository,name,deliveryId`. They use the same network admission, JSON restrictions, limits and response states as receipts. Requests cannot contain an Issue, recipient, identity, command or configuration field. Status lookup creates no binding or job.
+
+A first submission transaction pins a separate announcement binding to the locally configured audience, owner, channel and robot. It neither uses nor modifies Issue source bindings. Existing bindings cannot be redirected by changing configuration. Each output rechecks the named route and current identities; revocation blocks new output, but cannot retract an in-flight send. Unlike existing Issue receipts, disabling HTTP or removing its repository also prevents announcement output. Older code does not authorize this new request kind: on rollback it may revoke pending announcements, so preserve the new evidence and inspect it before continuing.
+
+Announcements share the global deliveryId namespace, digest checks, transaction, durable outbox, pacing and ACK handling. Same ID/content/binding does not send again; conflicts and unknown outcomes must not be bypassed with a fresh ID. An unknown send blocks later output on that announcement binding. Names are independent queues, not a global cross-route or cross-process send lock. Approve the audience and public-content purpose before configuring a route; an admitted source device can submit arbitrary text to configured audiences. Deploy/start/completion policy belongs to the caller, not this generic bridge.
+
 ## Persistence and uncertainty
 
 Both transports share the existing global deliveryId, immutable binding, canonical public text SHA-256, transaction and outbox. HTTP text is literal; a Slack submission compares after the existing Slack text decoding. Same ID/binding/text returns current state without adding another job. Any differing content/binding is rejected. Do not open a new ID to retry an unknown result. On restart, sending becomes unknown; unknown is not replayed and blocks later group jobs on that binding. Unknown network responses must be reconciled through status and existing controlled records, not blindly retried. `not_found` is only a local lookup result, not proof no external side effect ever happened.
@@ -61,6 +75,6 @@ The server bounds headers/requests/idle sockets to about five seconds, limits bo
 
 ## Offline checks and rollout
 
-`node --test test/receipt-http.test.js` uses temporary loopback listeners, new temporary SQLite stores, synthetic source messages and mock Slack/WeCom; it does not use production state, platforms or prior real test bindings. `npm run check` includes all regressions. Local success does not prove real network isolation, tenant send windows, restart behavior on the deployed service or audience delivery.
+`node --test test/receipt-http.test.js test/announcements.test.js` uses temporary loopback listeners, new temporary SQLite stores, synthetic source messages and mock Slack/WeCom; it does not use production state, platforms or prior real test bindings. `npm run check` includes all regressions. Local success does not prove real network isolation, tenant send windows, restart behavior on the deployed service or audience delivery.
 
 A later deployment must preserve the whole current private state consistently, keep this feature disabled first, and separately verify the approved network restriction before enabling. Roll back code/config only after stopping the single writer and preserving newly accepted jobs/status; never restore an old database over new receipts or reset unknown to pending. Do not use the new transport to bypass a rejected send/test or retry it through a different path. This change itself does not enable, deploy, modify networking, create credentials or send any real messages.

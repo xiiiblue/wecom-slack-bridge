@@ -23,7 +23,7 @@ export function loadConfig(env = process.env) {
   if (config.feedbackRepositories.size && !/^[UW][A-Z0-9]+$/.test(config.feedbackUser || '')) throw new Error('Feedback requires FEEDBACK_REPLY_USER_ID');
   if (config.feedbackRepositories.size && !config.replyBot) throw new Error('Feedback requires fixed reply bot');
   if (!config.allowedChats.size) throw new Error('WECOM_ALLOWED_CHAT_IDS must not be empty');
-  config.receiptHttp = receiptHttpConfig(env, config.feedbackRepositories);
+  config.receiptHttp = receiptHttpConfig(env, config.feedbackRepositories, config.allowedChats);
   if (config.allowedChats.has(config.ownerUser)) throw new Error('Owner ID must not be a group destination');
   if (Boolean(config.replyBot) === Boolean(config.replyUser)) throw new Error('Set exactly one SLACK_REPLY_BOT_ID or SLACK_REPLY_USER_ID');
   if (!/^[CG][A-Z0-9]+$/.test(config.slackChannel)) throw new Error('SLACK_CHANNEL_ID must be a channel ID');

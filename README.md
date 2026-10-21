@@ -73,4 +73,4 @@ npm start
 
 可选跨天原群结果回传见 [长期来源反馈](docs/SOURCE_FEEDBACK.md)，默认关闭。
 
-Optional [direct receipt HTTP transport](docs/HTTP_RECEIPTS.md) is disabled by default. It only submits results and queries their status for existing active source bindings; explicit reviewed network admission is required before enabling. It does not authenticate a developer application or verify business completion.
+Optional [direct receipt HTTP transport](docs/HTTP_RECEIPTS.md) is disabled by default. It submits results for existing active source bindings and optionally for separately configured, pinned named audiences; explicit reviewed network admission is required before enabling. It does not authenticate a developer application or verify business completion.

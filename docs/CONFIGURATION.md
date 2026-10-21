@@ -63,3 +63,5 @@ npm run config:check
 ## Optional direct receipt HTTP ingress
 
 Default off with no listener. The separate [HTTP receipt contract](HTTP_RECEIPTS.md) defines explicit bind/peer/repository settings, required network-trust acknowledgement, strict submission/status schemas, persistence and unknown outcomes. Enabling adds a new inbound network capability and requires its own reviewed scope; no credentials are generated. A source IP is not Codex/user identity.
+
+Named announcements additionally require `RECEIPT_HTTP_ANNOUNCEMENT_TARGETS` (default `[]`), a strict local array of existing approved repository/name/group mappings. See the [announcement contract](HTTP_RECEIPTS.md#optional-named-announcements). Requests cannot supply recipients; existing pinned routes cannot be redirected. No second listener, writer or credentials are added.

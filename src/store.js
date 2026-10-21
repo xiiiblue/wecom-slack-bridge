@@ -37,6 +37,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS feedback_deliveries (
       delivery_id TEXT PRIMARY KEY, request TEXT NOT NULL, digest TEXT NOT NULL, job INTEGER NOT NULL UNIQUE);`);
     this.db.exec('CREATE TABLE IF NOT EXISTS feedback_commands (source TEXT PRIMARY KEY, digest TEXT NOT NULL)');
+    this.db.exec('CREATE TABLE IF NOT EXISTS announcement_bindings (request TEXT PRIMARY KEY, repository TEXT NOT NULL, name TEXT NOT NULL, wecom_bot TEXT NOT NULL, UNIQUE(repository,name))');
     this.db.exec("UPDATE jobs SET status='unknown' WHERE status='sending'");
   }
   transaction(fn) { this.db.exec('BEGIN IMMEDIATE'); try { const value = fn(); this.db.exec('COMMIT'); return value; } catch (e) { this.db.exec('ROLLBACK'); throw e; } }
