@@ -1,10 +1,11 @@
-import { App, LogLevel } from '@slack/bolt';
+import { App, LogLevel, SocketModeReceiver } from '@slack/bolt';
 import AiBot from '@wecom/aibot-node-sdk';
 import { loadConfig } from './config.js';
 import { Store } from './store.js';
 import { Bridge } from './bridge.js';
 import { AttachmentRelay } from './attachments.js';
 import { startReceiptHttp } from './receipt-http.js';
+import { connectionFailure, observeSlack } from './recovery.js';
 
 // SDK logs can include frames, signed URLs, and tokens. Never forward their arguments.
 const log = (event, fields = {}) => console.log(JSON.stringify({ time: new Date().toISOString(), event, ...fields }));
@@ -30,7 +31,10 @@ export function createWecomTransport(client) {
     },
   };
 }
-export async function startBridge({ createApplication } = {}) {
+export async function startBridge({ createApplication, adapters = {} } = {}) {
+  const AppClient = adapters.App ?? App;
+  const SocketReceiver = adapters.SocketModeReceiver ?? SocketModeReceiver;
+  const WecomClient = adapters.WecomClient ?? AiBot.WSClient;
   let store, app, wecom, bridge, health, receipts, stopping = false;
   let startupStage = 'config';
   async function shutdown(code = 0) {
@@ -56,10 +60,18 @@ export async function startBridge({ createApplication } = {}) {
     const application = createApplication ? await createApplication({ config, store, env: process.env }) : null;
     await application?.initialize?.({ store, config });
     startupStage = 'connect';
-    app = new App({ token: config.slackToken, appToken: config.slackAppToken, socketMode: true,
-      logger: quietLogger, clientOptions: { retryConfig: { retries: 0 }, rejectRateLimitedCalls: true, timeout: 10000 } });
-    wecom = new AiBot.WSClient({ botId: config.wecomBotId, secret: config.wecomSecret, logger: quietLogger, maxReconnectAttempts: 10, requestTimeout: 10000 });
+    const clientOptions = { retryConfig: { retries: 0 }, rejectRateLimitedCalls: true, timeout: 10000 };
+    const receiver = new SocketReceiver({ appToken: config.slackAppToken, logger: quietLogger,
+      autoReconnectEnabled: false, installerOptions: { clientOptions } });
+    const slackConnected = observeSlack(receiver.client, { log, shutdown, isStopping: () => stopping });
+    app = new AppClient({ token: config.slackToken, receiver, deferInitialization: true,
+      logger: quietLogger, clientOptions });
+    // Await Bolt's own identity check so constructor-side rejection cannot escape.
+    await app.init();
+    if (stopping) return;
+    wecom = new WecomClient({ botId: config.wecomBotId, secret: config.wecomSecret, logger: quietLogger, maxReconnectAttempts: 10, requestTimeout: 10000 });
     const identity = await app.client.auth.test();
+    if (stopping) return;
     if (!identity.ok || !identity.user_id || !identity.bot_id) throw new Error('Cannot verify bridge identity');
     if (config.replyBot === identity.bot_id || config.replyUser === identity.user_id) { startupStage = 'identity'; throw new Error('Responder must not be bridge identity'); }
     bridge = new Bridge({ config, store, application, own: { bot: identity.bot_id, user: identity.user_id }, log,
@@ -90,10 +102,13 @@ export async function startBridge({ createApplication } = {}) {
     startupStage = 'receipt_http';
     if (!stopping) receipts = await startReceiptHttp(bridge);
     if (stopping) { await receipts?.close(); return { config, store, bridge, shutdown }; }
-    health = setInterval(() => { store.prune(Date.now()); log('health', { wecomConnected: wecom.isConnected, queue: store.counts() }); bridge.drain(); }, 30000);
+    health = setInterval(() => { store.prune(Date.now()); log('health', { wecomConnected: wecom.isConnected, slackConnected: slackConnected(), queue: store.counts() }); bridge.drain(); }, 30000);
     log('bridge_started'); bridge.drain();
     return { config, store, bridge, shutdown };
-  } catch {
-    log('startup_failed', { stage: startupStage }); await shutdown(startupStage === 'connect' ? 1 : 78);
+  } catch (error) {
+    const failure = connectionFailure(error);
+    const exitCode = startupStage === 'connect' ? failure.exitCode : 78;
+    log('startup_failed', { stage: startupStage, code: failure.code, exitCode });
+    await shutdown(exitCode);
   }
 }

@@ -16,7 +16,9 @@ Environment=STATE_DIR=/var/lib/wecom-slack-bridge
 EnvironmentFile=/etc/wecom-slack-bridge.env
 ExecStart=/usr/bin/node /opt/wecom-slack-bridge/src/main.js
 Restart=on-failure
-RestartSec=15
+
+# At most four starts per five minutes, even during a persistent outage.
+RestartSec=90
 RestartPreventExitStatus=78
 StateDirectory=wecom-slack-bridge
 StateDirectoryMode=0700

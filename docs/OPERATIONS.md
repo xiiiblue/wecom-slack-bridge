@@ -68,3 +68,11 @@ unknown 先核对真实两端结果；不能通过改数据库、重建根消息
 ## 可选附件故障
 
 `attachment_ingress_failed` 只说明受限下载/解密/缓存失败；`delivery_unknown` 的 attachments/attachments_ready 阶段说明外部副作用可能已发生。核验原根和真实文件，不重放。没有内存缓存的重启入站任务不能报告附件成功，回退须先核对并隔离未完成附件任务，详见[图片附件](ATTACHMENTS.md)。
+
+## 连接失败自动恢复
+
+Slack 启动身份校验在受控异步流程中等待，网络失败退出1；固定可识别的永久认证/权限错误退出78。Slack Socket Mode 的连接错误或断开（包括平台正常回收连接）先停止新派发、有限等待当前调用，再退出，由唯一 supervisor 重建连接；不同时运行 SDK 自动重连。企微原有重连与连接被替代的退出78行为保持不变。
+
+systemd 模板使用90秒重启间隔，保留五分钟五次启动限制与退出78禁止重启。持续网络故障不会因15秒密集重启耗尽限制；恢复可能等待下一次重试及连接耗时。手工频繁启动仍可能触发限制。不受 systemd 管理的部署须配置同等 supervisor 策略。持续程序错误也会周期重试，应观察告警与日志。
+
+新增 `slack_authenticated`、`slack_connected`、`slack_disconnected`、`slack_connection_error`；health 同时记录 `slackConnected`。连接错误仅保留固定白名单 code 和退出分类，不记录原始异常。健康状态不证明消息已送达。重启不补拉 Slack 历史消息，不重放 unknown，不延长 TTL；停机消息需逐条核验消费/发送记录后另行处理。

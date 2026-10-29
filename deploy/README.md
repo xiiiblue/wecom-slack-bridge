@@ -52,7 +52,7 @@ sudo systemctl status wecom-slack-bridge.service
 
 首次启动不必同时开机启用。通过合成文本 [人工验收](../docs/ACCEPTANCE.md) 并确认常驻要求后，才在授权内执行 `systemctl enable wecom-slack-bridge.service`。检查实际代码提交、进程用户、唯一连接、状态权限、配置来源和脱敏日志；进程 active 不等于真实消息往返。
 
-退出78表示配置/状态/身份类错误、企微认证耗尽或连接被替代；模板禁止自动重启该退出码。网络启动失败或企微重连耗尽退出1，可由 supervisor 在重启频率上限内恢复。应用应先处理根因，不反复抢 Bot ID。其他错误、队列状态与日志见 [排障](../docs/OPERATIONS.md)。
+退出78表示配置/状态/身份类错误、企微认证耗尽或连接被替代；模板禁止自动重启该退出码。网络启动失败、Slack 连接断开或企微重连耗尽退出1，可由 supervisor 恢复。模板每90秒重试，保留五分钟五次启动限制，避免持续断网快速耗尽次数；已知永久 Slack 认证错误退出78。应用应先处理根因，不反复抢 Bot ID。其他错误、队列状态与日志见 [排障](../docs/OPERATIONS.md)。
 
 ## 4. 停写与一致备份
 
